@@ -308,7 +308,7 @@ if __name__ == "__main__":
 |----------|------|
 | **PyInstaller** | 无需额外操作——包内已附带 hook，会自动生效。 |
 | **Nuitka** | 添加 `--user-package-configuration-file=nuitka-package.config.yml`（配置内容见下方），并添加 `--nofollow-import-to=Microsoft,System` 以避免 CLR 导入问题。 |
-| **其他** | 将 `qtwebview2` 下的 `lib/` 目录手动复制到可执行文件同级目录。 |
+| **其他** | 确保 `lib/` 目录在 `qtwebview2` 包下保持原有相对位置，以便运行时能正确定位 DLL。具体做法请参考对应打包工具的文档。 |
 
 <details>
 <summary>Nuitka 配置文件 (nuitka-package.config.yml)</summary>

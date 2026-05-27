@@ -302,7 +302,7 @@ When packaging your application, ensure the files under `qtwebview2/lib/` are in
 |----------|-------|
 | **PyInstaller** | No action needed — a hook is shipped with the package and runs automatically. |
 | **Nuitka** | Add `--user-package-configuration-file=nuitka-package.config.yml` with the config below, and `--nofollow-import-to=Microsoft,System` to avoid CLR import issues. |
-| **Others** | Copy the `lib/` directory from `qtwebview2` into your distribution alongside the executable. |
+| **Others** | Ensure the `lib/` directory remains in its original position under the `qtwebview2` package so the DLLs can be located at runtime. Refer to your packager's documentation for how to include package data. |
 
 <details>
 <summary>Nuitka config (nuitka-package.config.yml)</summary>
