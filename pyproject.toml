@@ -44,8 +44,11 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/xiaosuyyds/QtWebView2"
 
+[project.entry-points.pyinstaller40]
+hook-dirs = "qtwebview2.__pyinstaller__:get_hook_dirs"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.package-data]
-qtwebview2 = ["lib/**/*.md", "lib/**/*.dll", "*.md"]
+qtwebview2 = ["lib/**/*.md", "lib/**/*.dll", "*.md", "__pyinstaller__/**/*.py"]

@@ -65,16 +65,9 @@ def load_dotnet_env(callback=None):
         # Log detailed information for developers
         logger.critical("Critical Error: Failed to initialize .NET environment for WebView2.", exc_info=True)
 
-        user_msg = (
-            "Failed to initialize core component WebView2.\n\n"
-            "This is likely because your system is missing the 'WebView2 Evergreen Runtime'."
-        )
-
         # Raise an exception
-        raise exceptions.WebView2RuntimeExceptionNotFound(
-            message=f"Failed to initialize .NET environment. Original error: {repr(e)}",
-            user_message=user_msg,
-            download_url="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+        raise exceptions.WebviewInitException(
+            "Critical Error: Failed to initialize .NET environment for WebView2."
         ) from e
 
     logger.debug("Loaded .NET environment for WebView2.")

@@ -94,6 +94,7 @@ class QtWebView2Widget(QWidget):
             wsgi_executor: Union[concurrent.futures.Executor, int] = 8,
             init_settings_hook: Optional[Callable[[Any], None]] = None,
             fullscreen_support: bool = True,
+            browser_executable_folder: Optional[str] = None,
             parent: Optional[QWidget] = None,
     ):
         """
@@ -126,6 +127,9 @@ class QtWebView2Widget(QWidget):
           Executed before loading the URL but after initialization.
         :param fullscreen_support: If True, automatically handles window fullscreen toggling when
           the web element requests fullscreen.
+        :param browser_executable_folder: Path to a fixed-version WebView2 runtime. When provided,
+          the bundled runtime is used instead of the system's Evergreen runtime. The path should
+          point to a folder containing msedgewebview2.exe.
         :param parent: Parent widget
         """
         super().__init__(parent)
@@ -173,6 +177,7 @@ class QtWebView2Widget(QWidget):
         self._no_local_storage = no_local_storage
         self._init_settings_hook = init_settings_hook
         self._fullscreen_support = fullscreen_support
+        self._browser_executable_folder = browser_executable_folder
 
         # --- Internal State ---
         if typing.TYPE_CHECKING:
@@ -237,26 +242,6 @@ class QtWebView2Widget(QWidget):
         dotnet.load_dotnet_env()
         try:
             self._webview = dotnet.WinForms.WebView2()
-
-            props = dotnet.WinForms.CoreWebView2CreationProperties()
-
-            if not self._no_local_storage:
-                user_data_folder = self._user_data_folder
-                if not user_data_folder:
-                    app_name = QCoreApplication.applicationName() or "DefaultQtApp"
-                    data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
-                    if not data_path:
-                        data_path = os.path.join(dotnet.System_.IO.Path.GetTempPath(), app_name)
-                    user_data_folder = os.path.join(data_path, "WebView2_UserData")
-
-                logger.debug(f"WebView2 UserDataFolder: {user_data_folder}")
-
-                props.UserDataFolder = user_data_folder
-            else:
-                logger.debug("WebView2 local storage is disabled")
-
-            self._webview.CreationProperties = props
-
             self._webview.CoreWebView2InitializationCompleted += self._on_webview_ready
             self._webview.WebMessageReceived += self._on_script_notify
 
@@ -264,9 +249,39 @@ class QtWebView2Widget(QWidget):
                 self._webview.DefaultBackgroundColor = dotnet.System_.Drawing.Color.Transparent
             elif self.background_color:
                 self._webview.DefaultBackgroundColor = dotnet.System_.Drawing.ColorTranslator.FromHtml(
-                    self.background_color)
+                    self.background_color
+                )
 
-            self._webview.EnsureCoreWebView2Async(None)
+            if self._no_local_storage:
+                user_data = None
+                logger.debug("WebView2 local storage is disabled")
+            else:
+                user_data = self._user_data_folder
+                if not self._user_data_folder:
+                    app_name = QCoreApplication.applicationName() or "DefaultQtApp"
+                    data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+                    if not data_path:
+                        data_path = os.path.join(dotnet.System_.IO.Path.GetTempPath(), app_name)
+                    user_data = os.path.join(data_path, "WebView2_UserData")
+                logger.debug(f"WebView2 UserDataFolder: {user_data}")
+
+            if self._browser_executable_folder is not None:
+                # Fixed-version: use bundled WebView2 runtime
+                env_task = dotnet.Core.CoreWebView2Environment.CreateAsync(
+                    self._browser_executable_folder,
+                    user_data,
+                )
+                env_task.Wait()
+                if env_task.IsFaulted:
+                    raise env_task.Exception.InnerException or env_task.Exception
+                self._webview.EnsureCoreWebView2Async(env_task.Result)
+            else:
+                # Evergreen: use system WebView2 runtime via implicit initialization
+                props = dotnet.WinForms.CoreWebView2CreationProperties()
+                if user_data:
+                    props.UserDataFolder = user_data
+                self._webview.CreationProperties = props
+                self._webview.EnsureCoreWebView2Async(None)
 
         except Exception as e:
             logger.error(f"Could not start WebView2 initialization: {repr(e)}", exc_info=True)

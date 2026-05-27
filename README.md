@@ -294,6 +294,63 @@ if __name__ == "__main__":
     sys.exit(app.exec())
 ```
 
+## 📦 Packaging
+
+When packaging your application, ensure the files under `qtwebview2/lib/` are included — they contain the .NET assemblies and native DLLs required at runtime.
+
+| Packager | Notes |
+|----------|-------|
+| **PyInstaller** | No action needed — a hook is shipped with the package and runs automatically. |
+| **Nuitka** | Add `--user-package-configuration-file=nuitka-package.config.yml` with the config below, and `--nofollow-import-to=Microsoft,System` to avoid CLR import issues. |
+| **Others** | Copy the `lib/` directory from `qtwebview2` into your distribution alongside the executable. |
+
+<details>
+<summary>Nuitka config (nuitka-package.config.yml)</summary>
+
+```yaml
+- module-name: 'qtwebview2'
+  data-files:
+    - dirs:
+        - 'lib'
+  dlls:
+    - from_filenames:
+        relative_path: 'lib/runtimes/win-x86/native'
+        prefixes:
+          - 'WebView2Loader'
+      when: 'win32 and arch_x86'
+    - from_filenames:
+        relative_path: 'lib/runtimes/win-x64/native'
+        prefixes:
+          - 'WebView2Loader'
+      when: 'win32 and arch_amd64'
+    - from_filenames:
+        relative_path: 'lib/runtimes/win-arm64/native'
+        prefixes:
+          - 'WebView2Loader'
+      when: 'win32 and arch_arm64'
+    - from_filenames:
+        relative_path: 'lib/x86'
+        prefixes:
+          - 'WebView2Loader'
+      when: 'win32 and arch_x86'
+    - from_filenames:
+        relative_path: 'lib/x64'
+        prefixes:
+          - 'WebView2Loader'
+      when: 'win32 and arch_amd64'
+    - from_filenames:
+        relative_path: 'lib/arm64'
+        prefixes:
+          - 'WebView2Loader'
+      when: 'win32 and arch_arm64'
+    - from_filenames:
+        relative_path: 'lib'
+        prefixes:
+          - 'Microsoft.'
+      when: 'win32'
+```
+</details>
+
 ## License
 
 Copyright (c) 2025-2026 Xiaosu.
