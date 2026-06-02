@@ -43,7 +43,7 @@ python -m pip install qtwebview2
 Alternatively, you can install from the source:
 
 ```bash
-git clone https://github.com/xiaosuyyds/QtWebView2.git
+git clone https://github.com/xiaosuawa/QtWebView2.git
 cd QtWebView2
 python -m pip install .
 ```

@@ -47,7 +47,7 @@ python -m pip install qtwebview2
 或者，您也可以从源码安装：
 
 ```bash
-git clone https://github.com/xiaosuyyds/QtWebView2.git
+git clone https://github.com/xiaosuawa/QtWebView2.git
 cd QtWebView2
 python -m pip install .
 ```
