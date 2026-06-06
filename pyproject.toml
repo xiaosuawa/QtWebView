@@ -9,7 +9,7 @@ authors = [
 ]
 description = "A lightweight and powerful WebView2 widget for Python Qt (PySide/PyQt) with a seamless JS bridge."
 readme = "README.md"
-version = "0.4.2"
+version = "0.5.0"
 requires-python = ">=3.9"
 license = "MPL-2.0"
 license-files = ["LICENSE"]
@@ -36,7 +36,6 @@ classifiers = [
     "Topic :: Software Development :: User Interfaces"
 ]
 dependencies = [
-    "pywin32>=300",
     "qtpy>=2.0.0",
     "pythonnet>=3.0.0"
 ]

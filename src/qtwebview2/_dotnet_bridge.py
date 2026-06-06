@@ -26,7 +26,7 @@ else:
     WinForms = None
 
 
-def load_dotnet_env(callback=None):
+def load_dotnet_env():
     global dotnet_load_flag
 
     global System_, Core, WinForms
@@ -34,8 +34,6 @@ def load_dotnet_env(callback=None):
     try:
         with dotnet_load_lock:
             if dotnet_load_flag:
-                if callback:
-                    callback()
                 return
             logger.debug("Loading .NET environment for WebView2.", stack_info=True)
 
@@ -71,5 +69,3 @@ def load_dotnet_env(callback=None):
         ) from e
 
     logger.debug("Loaded .NET environment for WebView2.")
-    if callback:
-        callback()

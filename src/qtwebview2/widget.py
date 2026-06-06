@@ -12,11 +12,9 @@ import webbrowser
 import concurrent.futures
 from typing import Callable, Any, Optional, Union
 
-import win32con
-import win32gui
-
-from qtpy.QtCore import Qt, Slot, QObject, Signal, QCoreApplication, QTimer, QStandardPaths
-from qtpy.QtWidgets import QWidget
+from qtpy.QtCore import Slot, QObject, Signal, QCoreApplication, QTimer, QStandardPaths
+from qtpy.QtWidgets import QWidget, QVBoxLayout
+from qtpy.QtGui import QWindow
 
 from .logger import logger
 from . import exceptions
@@ -59,7 +57,7 @@ class DictJsBridge:
         else:
             raise ValueError(f"Undefined JS API: {name}")
 
-    def bind_js_api_func(self, func: Callable, async_func: bool = False, name: str = None):
+    def bind_js_api_func(self, func: Callable, async_func: bool = False, name: Optional[str] = None):
         """ Decorator to bind a Python function to the JS API. """
         name = name or func.__name__
         if async_func:
@@ -133,8 +131,9 @@ class QtWebView2Widget(QWidget):
         :param parent: Parent widget
         """
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
 
         self._init_webview2_signal.connect(self._init_webview)
 
@@ -184,7 +183,6 @@ class QtWebView2Widget(QWidget):
             self._webview: Optional[dotnet.WinForms.WebView2] = None
         else:
             self._webview = None
-        self._webview_hwnd: Optional[int] = None
         self._js_callbacks: dict[str, Callable[..., Any]] = {}
         self._saved_window_state = None
 
@@ -199,19 +197,8 @@ class QtWebView2Widget(QWidget):
         if self._fullscreen_support:
             self.bridge.fullscreen_changed.connect(self._default_on_fullscreen_change)
 
-        self._resize_throttle_timer = QTimer(self)
-        self._resize_throttle_timer.setSingleShot(True)
-        self._resize_throttle_timer.setInterval(int(1000 / 60))
-        self._resize_throttle_timer.timeout.connect(self._resize_webview)
-
         if not self._lazyload:
-            if not dotnet.dotnet_load_flag:
-                threading.Thread(
-                    target=lambda: dotnet.load_dotnet_env(self._init_webview2_signal.emit),
-                    daemon=True
-                ).start()
-            else:
-                QTimer.singleShot(0, self._init_webview)
+            QTimer.singleShot(0, self._init_webview)
 
         self._pending_calls = []  # Store calls made before initialization
         self._has_shown = False
@@ -219,8 +206,9 @@ class QtWebView2Widget(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         if self._lazyload and not self._has_shown:
-            self._has_shown = True
             QTimer.singleShot(0, self._init_webview)
+
+        self._has_shown = True
 
         if self.is_ready:
             self._webview.Visible = True
@@ -336,10 +324,11 @@ class QtWebView2Widget(QWidget):
         self.is_ready = True
         self._webview_hwnd = self._webview.Handle.ToInt32()
 
-        # Embed the window and adjust the style
-        win32gui.SetParent(self._webview_hwnd, int(self.winId()))
-        style = win32gui.GetWindowLong(self._webview_hwnd, win32con.GWL_STYLE)
-        win32gui.SetWindowLong(self._webview_hwnd, win32con.GWL_STYLE, style & ~win32con.WS_BORDER | win32con.WS_CHILD)
+        # Embed the window
+        self._webview_window = QWindow.fromWinId(self._webview_hwnd)
+        self._container = QWidget.createWindowContainer(self._webview_window, self)
+
+        self._layout.addWidget(self._container)
 
         self._webview.Visible = self.isVisible()
 
@@ -360,10 +349,6 @@ class QtWebView2Widget(QWidget):
             )
 
             self._webview.CoreWebView2.WebResourceRequested += self._on_web_resource_requested
-
-        win32gui.ShowWindow(self._webview_hwnd, win32con.SW_SHOW)
-
-        self._resize_webview()
 
         if self.url:
             self.load_url(self.url)
@@ -552,22 +537,6 @@ class QtWebView2Widget(QWidget):
         logger.debug(f"return_result_to_js: {script}")
 
         self.bridge.execute_js_from_thread.emit(script)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if not self._resize_throttle_timer.isActive():
-            self._resize_throttle_timer.start()
-
-    @Slot()
-    def _resize_webview(self):
-        if self._webview_hwnd:
-            dpr = self.devicePixelRatioF()
-            if self.window() and self.window().windowHandle():
-                dpr = self.window().windowHandle().devicePixelRatio()
-
-            physical_width = int(self.width() * dpr)
-            physical_height = int(self.height() * dpr)
-            win32gui.MoveWindow(self._webview_hwnd, 0, 0, physical_width, physical_height, True)
 
     def closeEvent(self, event):
         if self._webview:
