@@ -7,20 +7,19 @@ name = "qtwebview2"
 authors = [
   { name="校溯", email="xiaosu@xiaosu.icu" }
 ]
-description = "A lightweight and powerful WebView2 widget for Python Qt (PySide/PyQt) with a seamless JS bridge."
+description = "A lightweight and powerful cross-platform webview widget for Python Qt (PySide/PyQt), powered by wry."
 readme = "README.md"
-version = "0.5.0"
-requires-python = ">=3.9"
+version = "0.6.0"
+requires-python = ">=3.10"
 license = "MPL-2.0"
 license-files = ["LICENSE"]
-keywords = ["qt", "qtpy", "pyqt", "pyside", "web", "webview", "webview2"]
+keywords = ["qt", "qtpy", "pyqt", "pyside", "web", "webview", "wry", "cross-platform"]
 classifiers = [
     # Development Status
     "Development Status :: 4 - Beta", # Beta is perfect for a 0.x.y release
 
     # Supported Python Versions
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -29,6 +28,8 @@ classifiers = [
 
     # Operating System
     "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
 
     # Intended Audience & Topic
     "Intended Audience :: Developers",
@@ -36,18 +37,13 @@ classifiers = [
     "Topic :: Software Development :: User Interfaces"
 ]
 dependencies = [
-    "qtpy>=2.0.0",
-    "pythonnet>=3.0.0"
+    "qtpy~=2.0",
+    "wryview~=0.2.0",
+    "typing-extensions~=4.13"
 ]
 
 [project.urls]
-Homepage = "https://github.com/xiaosuawa/QtWebView2"
-
-[project.entry-points.pyinstaller40]
-hook-dirs = "qtwebview2.__pyinstaller__:get_hook_dirs"
+Homepage = "https://github.com/xiaosuawa/QtWebView"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-
-[tool.setuptools.package-data]
-qtwebview2 = ["lib/**/*.md", "lib/**/*.dll", "*.md", "__pyinstaller__/**/*.py"]

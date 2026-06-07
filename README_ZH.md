@@ -1,84 +1,94 @@
-# QtWebView2
+# QtWebView
 
 <div align="center">
 <img src="https://img.shields.io/pypi/v/qtwebview2" alt="PyPI version">
 <img src="https://img.shields.io/pypi/l/qtwebview2" alt="License">
 <img src="https://img.shields.io/pypi/pyversions/qtwebview2" alt="Python versions">
-<img src="https://img.shields.io/pypi/dm/qtwebview2" alt="Downloads">
 </div>
 
-| [English](https://github.com/xiaosuyyds/QtWebView2/blob/master/README.md) | 简体中文 |
+| [English](README.md) | 简体中文 |
 
-## 📖 介绍
+---
 
-QtWebView2 是一个用于将微软的 WebView2 嵌入到 Qt 应用程序中的 Python 包装器，并配备了一个功能强大的 JS 桥。它基于 QtPy 和
-Python.NET 构建。
+## ⚡ v0.6.0 重构
 
-**请注意：** 本项目目前处于 Beta 阶段。API 可能会在未来的更新中发生变化，但我们非常欢迎早期使用者和反馈！
+v0.6.0 将旧的 **pythonnet + .NET CLR + WebView2 WinForms** 后端替换为 **[wryview](https://github.com/xiaosuawa/wryview)**（[wry](https://github.com/tauri-apps/wry) 的 Rust 绑定，[Tauri](https://tauri.app) 的 WebView 引擎）。
+
+带来 **跨平台支持**（Windows、macOS、Linux）、**更快的启动速度**（去掉了 .NET CLR）、以及 **wry API**（Cookie、DevTools、自定义协议等）。
+
+从 v0.5.x 升级请参考[迁移指南](#-从-v05x-迁移)。
+
+## 📖 简介
+
+QtWebView 将 wry WebView 作为原生子窗口嵌入任何 Qt（PySide/PyQt）widget。基于 QtPy 和 wryview。
 
 ## ✨ 特性
 
-- 🎸 **轻量级集成**: 通过 Python.NET 直接包装原生的 WebView2 控件，与 `QWebEngineView` 等方案相比，只会少量增加您应用程序的打包体积。
-- 🎻 **强大的 JS 桥**: 提供了一个健壮的 JS 桥接方案，使用 `Promise` 和 `async/await` 等现代 JS 特性，以实现 Python 和
-  JavaScript 之间的无缝双向通信。
-- 🎷 **WSGI兼容**: 允许直接将WSGI返回的内容传递给 WebView2，让资源传递或是编写都更加轻松。
-- 🎺 **开箱即用**: 提供了丰富的配置选项和稳健的错误处理，让您可以用最少的配置快速上手。
-- 🎼 **QtPy 支持**: 基于 QtPy 构建，使其同时兼容 PyQt6 和 PySide6。
-
-## 🤔 快速对比
-
-| 特性         |     QtWebView2 (本项目)      |      `pywebview`      |    `QWebEngineView` (Qt)    |
-|:-----------|:-------------------------:|:---------------------:|:---------------------------:|
-| **Qt 集成度** |      **原生级 (布局与事件)**      |   **伪嵌入 (焦点/事件问题)**   |         **真·原生控件**          |
-| **渲染方式**   |     基于 HWND (存在空域问题)      |   基于 HWND (存在空域问题)    |       完全成分合成 (无空域问题)        |
-| **跨平台性**   |      ❌ (仅限 Windows)       | ✅ (Win, macOS, Linux) |    ✅ (Win, macOS, Linux)    |
-| **包体积增加**  |          **最小**           |     较小，但需手动开发中间层      |           **巨大**            |
-| **后端架构模式** |    **无端口 WSGI** / JS 桥    |  本地 HTTP 服务器 / JS 桥   | `QWebChannel` / 本地 HTTP 服务器 |
-| **最适用场景**  | **注重无缝交互的轻量级 Windows 应用** |    简单的、窗口独立的跨平台应用     |       视觉效果复杂的大型 Qt 应用       |
+- **跨平台** — Windows（WebView2）、macOS（WKWebView）、Linux（WebKitGTK），统一 API。
+- **Qt 原生嵌入** — 真正的 QWidget 子窗口，非伪覆盖层。
+- **JS Bridge** — Python ↔ JavaScript 双向通信，支持 async/await。
+- **WSGI 兼容** — 在 WebView 中运行 Flask、Bottle、Django，通过自定义协议（无需 TCP 端口）。
+- **持久缓存** — 自动用户数据目录，实现快速热启动。支持无痕模式。
+- **Wry API** — Cookie、DevTools、缩放、打印、拖放、自定义 header 等。
+- **懒加载** — 窗口立即可见，WebView 后台加载。
 
 ## ⬇️ 安装
 
-⚠️ **注意：** 本库目前**仅支持 Windows 平台**。
-
 ```bash
-python -m pip install qtwebview2
+pip install qtwebview2
+
+# 还需要 Qt 后端：
+pip install pyside6    # 或 pyqt6
 ```
 
-或者，您也可以从源码安装：
+## 🧑‍💻 使用示例
 
-```bash
-git clone https://github.com/xiaosuawa/QtWebView2.git
-cd QtWebView2
-python -m pip install .
+### 基础用法
+
+```python
+import sys
+from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
+from qtwebview2 import QtWebViewWidget
+
+app = QApplication(sys.argv)
+win = QWidget()
+win.setWindowTitle("QtWebView")
+win.resize(800, 600)
+layout = QVBoxLayout(win)
+
+webview = QtWebViewWidget(url="https://example.com", parent=win)
+layout.addWidget(webview)
+
+win.show()
+sys.exit(app.exec())
 ```
 
-**重要！** 相关的 Qt 后端不会作为依赖被安装。您需要自行安装您偏好的后端（例如 PySide6 或 PyQt6）。
+### JS Bridge — Python ↔ JavaScript 双向通信
 
-## 🧑‍💻 使用方法
-
-这里是一个完整的示例，演示了其核心功能。
+通过 `DictJsBridge` 将 Python 函数暴露给 JavaScript。JS 端使用
+`window.qtwebview.api.funcName()` 调用，完全支持 `Promise` / `async` / `await`。
 
 ```python
 import sys
 from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
 from qtpy.QtCore import Slot, QCoreApplication
-from qtwebview2 import QtWebView2Widget, DictJsBridge
+from qtwebview2 import QtWebViewWidget, DictJsBridge
 
 # 设置一个应用名称，以便用户数据文件夹路径保持稳定
-QCoreApplication.setApplicationName("QtWebView2-Demo")
+QCoreApplication.setApplicationName("QtWebView-Demo")
 
 # 1. 初始化应用和窗口
 app = QApplication(sys.argv)
-window = QWidget()
-window.setWindowTitle("QtWebView2-Demo")
-window.setGeometry(100, 100, 800, 600)
-layout = QVBoxLayout(window)
+win = QWidget()
+win.setWindowTitle("JS Bridge 示例")
+win.resize(800, 600)
+layout = QVBoxLayout(win)
 
 # 2. 创建 JS 桥接实例
 js_bridge = DictJsBridge()
 
 # 3. 创建 WebView2 控件并注入 JS 桥
-webview = QtWebView2Widget(parent=window, js_apis=js_bridge)
+webview = QtWebViewWidget(js_apis=js_bridge, debug=True)
 layout.addWidget(webview)
 
 
@@ -96,14 +106,14 @@ html_content = """
 <html>
 <head><title>JS Bridge Test</title></head>
 <body style="font-family: sans-serif; text-align: center; background-color: #f0f0f0;">
-    <h1>QtWebView2 JS Bridge Demo</h1>
+    <h1>QtWebView JS Bridge Demo</h1>
     <button onclick="callPython()">点我调用Python！</button>
     <p>来自Python的结果: <b id="result">...</b></p>
     <script>
         async function callPython() {
             try {
                 // 使用 async/await 调用Python函数并获取结果
-                const os = await window.qtwebview2.api.get_user_os();
+                const os = await window.qtwebview.api.get_user_os();
                 document.getElementById('result').textContent = os;
             } catch (e) {
                 document.getElementById('result').textContent = '错误: ' + e;
@@ -117,27 +127,27 @@ html_content = """
 webview.load_html(html_content)
 
 
-# 6. (Python -> JS) 连接到一个信号，并在信号触发时执行JavaScript
-@Slot()
-def on_dom_loaded():
-    """当网页的DOM完全加载后，此函数会被调用。"""
-    print(f"DOM内容已加载。正在从Python执行JS...")
-    # 你也可以从Python执行JavaScript
-    webview.evaluate_js("""(function() {
-        const new_element = document.createElement('h2');
-        new_element.textContent = '来自Python的问候！';
-        document.body.appendChild(new_element);
-    })()""")
+# 6. Python → JS: 页面加载完成后执行 JavaScript
+@Slot(str, str)
+def on_page_loaded(evt, url):
+    if evt == "Finished":
+        webview.evaluate_js("""(function() {
+            const new_element = document.createElement('h2');
+            new_element.textContent = '来自Python的问候！';
+            document.body.appendChild(new_element);
+        })()""")
 
 
-# 使用 `domContentLoaded` 信号在加载时进行交互
-webview.bridge.domContentLoaded.connect(on_dom_loaded)
+webview.signals.page_loaded.connect(on_page_loaded)
 
-window.show()
+win.show()
 sys.exit(app.exec())
 ```
 
-一个 WSGI 示例（需要Flask）：
+### WSGI — 运行 Flask / Bottle / Django
+
+在 WebView 中运行 WSGI 应用，通过自定义协议（`qtwebview://` scheme）提供服务
+—— 无需 TCP 端口，零网络开销。也可以使用 `wsgi_scheme="localhost"` 切换到本地 HTTP 模式。
 
 ```python
 import sys
@@ -146,74 +156,71 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template_string
 
-from qtpy.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QFrame
+from qtpy.QtWidgets import (QApplication, QVBoxLayout, QHBoxLayout,
+                             QWidget, QLabel, QPushButton, QFrame)
 from qtpy.QtCore import Qt
-from qtwebview2 import QtWebView2Widget
+from qtwebview2 import QtWebViewWidget
 
-
+# ── Flask 应用 ───────────────────────────────────────────────────────
 flask_app = Flask(__name__)
-
-VIRTUAL_HOST = "myapp.local"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            padding: 0; margin: 0; 
-            background: #f5f7fa; color: #2c3e50; 
-            display: flex; justify-content: center; align-items: center; height: 100vh;
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         Helvetica, Arial, sans-serif;
+            background: #f5f7fa; color: #2c3e50;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh;
         }
-        .container { 
-            background: white; width: 80%; max-width: 600px;
-            padding: 40px; border-radius: 12px; 
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08); 
-            text-align: center;
+        .card {
+            background: #fff; width: 90%; max-width: 520px;
+            padding: 40px; border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08); text-align: center;
         }
-        h1 { margin-top: 0; color: #34495e; }
-        .tag { 
-            background: #e1f5fe; color: #0288d1; 
-            padding: 4px 8px; border-radius: 4px; font-size: 0.9em; font-weight: bold;
+        h1 { color: #34495e; margin-bottom: 8px; }
+        .tag {
+            display: inline-block; background: #e1f5fe; color: #0288d1;
+            padding: 3px 8px; border-radius: 4px; font-size: 0.85em;
+            font-weight: 600; margin-bottom: 20px;
         }
-        button { 
-            padding: 12px 24px; background: #00c853; color: white; 
-            border: none; border-radius: 6px; cursor: pointer; font-size: 16px;
-            transition: background 0.2s;
+        button {
+            padding: 10px 24px; background: #00c853; color: #fff;
+            border: none; border-radius: 6px; cursor: pointer; font-size: 15px;
+            transition: background 0.2s; margin-top: 16px;
         }
         button:hover { background: #00e676; }
         #result-box {
-            margin-top: 20px; padding: 15px; background: #263238; color: #80cbc4;
-            border-radius: 6px; font-family: monospace; text-align: left; min-height: 60px;
+            margin-top: 20px; padding: 16px; background: #263238;
+            color: #80cbc4; border-radius: 6px; font-family: "Fira Code",
+            "Cascadia Code", Consolas, monospace; text-align: left;
+            min-height: 60px; white-space: pre-wrap; font-size: 13px;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🐍 Flask + 🖥️ WebView2</h1>
-        <p>This is a running in Qt memory <span class="tag">WSGI App</span></p>
-        <p>Server Time: <strong>{{ time }}</strong></p>
-
-        <div style="margin: 30px 0;">
-            <button onclick="fetchData()">⚡ Initiate a fetch request</button>
-        </div>
-
-        <div id="result-box">// Click the button to get the JSON data...</div>
+    <div class="card">
+        <h1>🐍 Flask + 🖥️ QtWebView</h1>
+        <span class="tag">WSGI · 自定义协议</span>
+        <p>服务器时间: <strong>{{ time }}</strong></p>
+        <button onclick="fetchData()">⚡ 从 Flask 获取 JSON</button>
+        <div id="result-box">// 点击按钮...</div>
     </div>
-
     <script>
         async function fetchData() {
             const box = document.getElementById('result-box');
-            box.textContent = "// Loading...";
+            box.textContent = '// 加载中...';
             try {
-                const res = await fetch('/api/random', {method: 'POST'});
+                const res = await fetch('/api/random', { method: 'POST' });
                 const data = await res.json();
                 box.textContent = JSON.stringify(data, null, 2);
-            } catch(e) {
-                box.textContent = "Error: " + e;
+            } catch (e) {
+                box.textContent = 'Error: ' + e;
             }
         }
     </script>
@@ -221,144 +228,147 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
-@flask_app.route('/')
+@flask_app.route("/")
 def index():
-    return render_template_string(HTML_TEMPLATE, time=datetime.now().strftime("%H:%M:%S"))
+    return render_template_string(HTML_TEMPLATE,
+                                  time=datetime.now().strftime("%H:%M:%S"))
 
-
-@flask_app.route('/api/random', methods=['POST'])
+@flask_app.route("/api/random", methods=["POST"])
 def api_random():
     return jsonify({
         "value": random.randint(1000, 9999),
-        "source": "Internal Flask Backend",
-        "status": "success"
+        "source": "Flask 后端",
+        "status": "success",
     })
 
 
+# ── Qt 窗口 ─────────────────────────────────────────────────────────
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("QtWebView2 WSGI Demo")
-        self.resize(1000, 700)
+        self.setWindowTitle("QtWebView WSGI 示例")
+        self.resize(900, 640)
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        self.top_bar = QFrame()
-        self.top_bar.setFixedHeight(50)
-        self.top_bar.setStyleSheet("""
-            QFrame { background-color: #ffffff; border-bottom: 1px solid #e0e0e0; }
-            QLabel { color: #333; font-size: 14px; font-weight: bold; }
+        # 工具栏
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("""
+            QFrame { background: #fff; border-bottom: 1px solid #e0e0e0; }
+            QLabel { color: #333; font-size: 13px; font-weight: 600; }
             QPushButton {
-                background-color: transparent; border: 1px solid #ccc; border-radius: 4px;
-                padding: 5px 15px; color: #555;
+                background: transparent; border: 1px solid #ccc;
+                border-radius: 4px; padding: 4px 14px; color: #555;
             }
-            QPushButton:hover { background-color: #f0f0f0; color: #000; }
+            QPushButton:hover { background: #f0f0f0; color: #000; }
         """)
-
-        bar_layout = QHBoxLayout(self.top_bar)
-        bar_layout.setContentsMargins(15, 0, 15, 0)
-
-        title_label = QLabel("🚀 QtWebView2 Demo")
-
-        self.status_label = QLabel("🟢 WSGI Server Running")
-        self.status_label.setStyleSheet("color: #4caf50; font-size: 12px; font-weight: normal;")
-
-        refresh_btn = QPushButton("Reload")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.reload_webview)
-
-        bar_layout.addWidget(title_label)
-        bar_layout.addSpacing(20)
-        bar_layout.addWidget(self.status_label)
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(12, 0, 12, 0)
+        bar_layout.addWidget(QLabel("🚀 QtWebView WSGI 示例"))
         bar_layout.addStretch()
-        bar_layout.addWidget(refresh_btn)
+        reload_btn = QPushButton("重新加载")
+        reload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reload_btn.clicked.connect(self._reload)
+        bar_layout.addWidget(reload_btn)
+        layout.addWidget(bar)
 
-        self.webview = QtWebView2Widget(
-            parent=self,
-            wsgi_app=flask_app,
-            wsgi_host_name=VIRTUAL_HOST,
-            debug=True,
-            url=f"http://{VIRTUAL_HOST}/"
+        # WebView —— 通过 qtwebview:// scheme 提供 WSGI 服务
+        self.webview = QtWebViewWidget(
+            parent=self, wsgi_app=flask_app, debug=True
         )
+        layout.addWidget(self.webview, 1)
 
-        main_layout.addWidget(self.top_bar)
-
-        main_layout.addWidget(self.webview, 1)
-
-    def reload_webview(self):
+    def _reload(self):
         self.webview.reload()
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
-    window = MainWindow()
-    window.show()
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec())
 ```
 
-## 📦 打包
+## 🔄 从 v0.5.x 迁移
 
-在打包你的应用时，请确保 `qtwebview2/lib/` 下的文件被一并包含——它们包含了运行时所需的 .NET 程序集和原生 DLL。
+```python
+# 旧版 (v0.5.x)                          → 新版 (v0.6.0)
+from qtwebview2 import QtWebView2Widget    from qtwebview2 import QtWebViewWidget
+webview = QtWebView2Widget(url=...)        webview = QtWebViewWidget(url=...)
 
-| 打包工具 | 说明 |
-|----------|------|
-| **PyInstaller** | 无需额外操作——包内已附带 hook，会自动生效。 |
-| **Nuitka** | 添加 `--user-package-configuration-file=nuitka-package.config.yml`（配置内容见下方），并添加 `--nofollow-import-to=Microsoft,System` 以避免 CLR 导入问题。 |
-| **其他** | 确保 `lib/` 目录在 `qtwebview2` 包下保持原有相对位置，以便运行时能正确定位 DLL。具体做法请参考对应打包工具的文档。 |
+# 参数名称变更：
+# handle_new_window=True/False   → new_window_handler=lambda url: "allow"|"deny"
+# wsgi_host_name="myapp.local"   → wsgi_scheme="qtwebview"
+# browser_executable_folder=...  → (wry 不支持)
+# fullscreen_support=True        → (尚未实现)
+# no_local_storage=True          → (已移除，使用 incognito=True)
 
-<details>
-<summary>Nuitka 配置文件 (nuitka-package.config.yml)</summary>
+# 已移除的参数（无对等项）：
+# context_menus, init_settings_hook
 
-```yaml
-- module-name: 'qtwebview2'
-  data-files:
-    - dirs:
-        - 'lib'
-  dlls:
-    - from_filenames:
-        relative_path: 'lib/runtimes/win-x86/native'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_x86'
-    - from_filenames:
-        relative_path: 'lib/runtimes/win-x64/native'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_amd64'
-    - from_filenames:
-        relative_path: 'lib/runtimes/win-arm64/native'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_arm64'
-    - from_filenames:
-        relative_path: 'lib/x86'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_x86'
-    - from_filenames:
-        relative_path: 'lib/x64'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_amd64'
-    - from_filenames:
-        relative_path: 'lib/arm64'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_arm64'
-    - from_filenames:
-        relative_path: 'lib'
-        prefixes:
-          - 'Microsoft.'
-      when: 'win32'
+# v0.6.0 新增参数：
+# html, headers, navigation_handler, incognito, autoplay,
+# javascript_enabled, hotkeys_zoom, drag_drop_handler
 ```
-</details>
+
+## 📦 API 概览
+
+```python
+webview = QtWebViewWidget(
+    url="https://example.com",           # 初始 URL
+    html="<h1>Hello</h1>",               # 或初始 HTML
+    headers={"Authorization": "Bearer"},  # 自定义 HTTP 头
+    user_agent="CustomAgent/1.0",
+    debug=True,                            # DevTools 开启
+    transparent=False,
+    background_color="#1e1e1e",
+    navigation_handler=lambda url: True,   # 返回 False 阻止导航
+    new_window_handler=lambda url: "allow",
+    lazyload=True,                         # 延迟到 showEvent 加载
+    incognito=False,
+    user_data_folder="/path/to/cache",
+    wsgi_app=flask_app,
+    wsgi_scheme="qtwebview",
+    autoplay=False,
+    javascript_enabled=True,
+    hotkeys_zoom=True,
+    drag_drop_handler=lambda evt, paths, pos: True,
+)
+
+webview.load_url(url)                     # 导航
+webview.load_url_with_headers(url, hdrs)  # 带 header 导航
+webview.load_html(html)                   # 加载 HTML
+webview.reload()                          # 重新加载
+webview.url()                             # 获取当前 URL
+webview.eval_js(script)                   # 执行 JS
+webview.evaluate_js(script, callback)     # 带回调执行 JS
+webview.cookies()                         # 获取所有 cookie
+webview.cookies_for_url(url)              # 获取特定 URL 的 cookie
+webview.set_cookie(name, value)           # 设置 cookie
+webview.delete_cookie(name, url)          # 删除 cookie
+webview.open_devtools()                   # 打开 DevTools
+webview.close_devtools()                  # 关闭 DevTools
+webview.zoom(1.5)                         # 缩放 150%
+webview.print()                           # 打印页面
+webview.focus()                           # 聚焦 webview
+webview.set_background_color(r, g, b, a)  # 设置背景颜色
+webview.clear_all_browsing_data()         # 清除缓存
+
+# 信号
+webview.signals.page_loaded.connect(lambda evt, url: ...)
+webview.signals.title_changed.connect(lambda title: ...)
+webview.signals.navigation_requested.connect(lambda url: ...)
+webview.signals.new_window_requested.connect(lambda url: ...)
+webview.signals.web_message_received.connect(lambda msg: ...)
+webview.signals.initialization_done.connect(lambda: ...)
+```
 
 ## 许可证
 
 版权所有 (c) 2025-2026 Xiaosu。
 
-根据 [Mozilla Public License Version 2.0](https://github.com/xiaosuyyds/QtWebView2/blob/master/LICENSE) 的条款分发。
+根据 [Mozilla Public License Version 2.0](https://github.com/xiaosuawa/QtWebView/blob/master/LICENSE) 的条款分发。
+

@@ -208,3 +208,7 @@ __marimo__/
 # stubs
 
 stubs/
+
+# Local debug/profile files
+profile.json
+*.heapsnapshot

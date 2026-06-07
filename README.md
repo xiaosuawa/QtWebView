@@ -1,137 +1,157 @@
-# QtWebView2
+# QtWebView
 
 <div align="center">
 <img src="https://img.shields.io/pypi/v/qtwebview2" alt="PyPI version">
 <img src="https://img.shields.io/pypi/l/qtwebview2" alt="License">
 <img src="https://img.shields.io/pypi/pyversions/qtwebview2" alt="Python versions">
-<img src="https://img.shields.io/pypi/dm/qtwebview2" alt="Downloads">
 </div>
 
-| English | [简体中文](https://github.com/xiaosuyyds/QtWebView2/blob/master/README_ZH.md) |
+| English | [简体中文](README_ZH.md) |
+
+---
+
+## ⚡ v0.6.0 Rewrite
+
+v0.6.0 replaces the old **pythonnet + .NET CLR + WebView2 WinForms** backend with **[wryview](https://github.com/xiaosuawa/wryview)**, a Rust-powered binding for [wry](https://github.com/tauri-apps/wry) (the WebView engine used by [Tauri](https://tauri.app)).
+
+This brings **cross-platform support** (Windows, macOS, Linux), **faster startup** (no .NET CLR), and access to the **wry API** (cookies, devtools, custom protocols, etc.).
+
+See [Migration Guide](#-migration-from-v05x) below if upgrading from v0.5.x.
 
 ## 📖 Introduction
-QtWebView2 is a Python wrapper for embedding Microsoft's WebView2 into a Qt application, complete with a powerful JS bridge. It is built upon QtPy and Python.NET.
 
-**Disclaimer:** This project is currently in a beta stage. The API may change in future updates, but early adopters and feedback are welcome!
+QtWebView embeds a wry WebView as a native child window inside any Qt (PySide/PyQt) widget. Built on QtPy and wryview.
 
 ## ✨ Features
 
-- 🎸 **Lightweight Integration**: Directly wraps the native WebView2 control using Python.NET, resulting in a minimal increase in your application's package size compared to solutions like `QWebEngineView`.
-- 🎻 **Powerful JS Bridge**: Provides a robust JS bridge solution for seamless two-way communication between Python and JavaScript, using modern JS features like `Promise` and `async/await`.
-- 🎷 **WSGI Compatible**: Allows the content returned by WSGI to be passed directly to WebView2, passed directly to WebView2, making it easier to pass resources or write.
-- 🎺 **Out-of-the-Box**: Comes with rich configuration options and robust error handling, allowing you to get started quickly with minimal setup.
-- 🎼 **QtPy Support**: Built on QtPy, making it compatible with both PyQt6 and PySide6.
-
-## 🤔 Quick Comparison
-
-| Feature             |                    QtWebView2 (This Project)                    |                        `pywebview`                         |         `QWebEngineView` (Qt)          |
-|:--------------------|:---------------------------------------------------------------:|:----------------------------------------------------------:|:--------------------------------------:|
-| **Qt Integration**  |                **Native-like (Layout & Events)**                |         **Pseudo-embedding (Focus/Event Issues)**          |         **True Native Widget**         |
-| **Rendering**       |             HWND-based (Airspace issues, but minor)             |                HWND-based (Airspace issues)                | Fully composited (No airspace issues)  |
-| **Cross-Platform**  |                        ❌ (Windows Only)                         |                   ✅ (Win, macOS, Linux)                    |         ✅ (Win, macOS, Linux)          |
-| **Package Size**    |                           **Minimal**                           | Small, but the middle layer needs to be developed manually |             **Very Large**             |
-| **Backend Pattern** |                  **Portless WSGI** / JS Bridge                  |               Local HTTP Server / JS Bridge                |   `QWebChannel` / Local HTTP Server    |
-| **Best For...**     | **Lightweight Windows apps where seamless interaction is key.** |          Simple, standalone cross-platform apps.           | Visually complex, large-scale Qt apps. |
+- **Cross-Platform** — Windows (WebView2), macOS (WKWebView), Linux (WebKitGTK). Same API everywhere.
+- **Qt-Native Embedding** — True QWidget via native child window, not a pseudo-overlay.
+- **JS Bridge** — Two-way Python ↔ JavaScript communication with async/await support.
+- **WSGI Compatible** — Run Flask, Bottle, Django inside the webview via custom protocol (no TCP server).
+- **Persistent Cache** — Automatic user data folder for fast warm starts. Incognito mode available.
+- **Wry API** — Cookies, devtools, zoom, print, drag-drop, custom headers, and more.
+- **Lazy Loading** — Window appears instantly, WebView loads in background.
 
 ## ⬇️ Installation
-⚠️ **Note:** This library currently supports the **Windows platform only**.
 
 ```bash
-python -m pip install qtwebview2
+pip install qtwebview2
+
+# You also need a Qt backend:
+pip install pyside6    # or pyqt6
 ```
-
-Alternatively, you can install from the source:
-
-```bash
-git clone https://github.com/xiaosuawa/QtWebView2.git
-cd QtWebView2
-python -m pip install .
-```
-
-**Important!** The corresponding Qt backend is not installed as a dependency. You need to install your preferred backend (e.g., PySide6 or PyQt6) yourself.
 
 ## 🧑‍💻 Usage
-Here is a complete example demonstrating the core features.
+
+### Basic
 
 ```python
 import sys
 from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
-from qtpy.QtCore import Slot, QCoreApplication
-from qtwebview2 import QtWebView2Widget, DictJsBridge
+from qtwebview2 import QtWebViewWidget
 
-# Set an application name for the user data folder
-QCoreApplication.setApplicationName("QtWebView2-Demo")
-
-# 1. Initialize the application and window
 app = QApplication(sys.argv)
-window = QWidget()
-window.setWindowTitle("QtWebView2-Demo")
-window.setGeometry(100, 100, 800, 600)
-layout = QVBoxLayout(window)
+win = QWidget()
+win.setWindowTitle("QtWebView")
+win.resize(800, 600)
+layout = QVBoxLayout(win)
 
-# 2. Create an instance of the JS bridge
-js_bridge = DictJsBridge()
-
-# 3. Create the WebView2 widget and inject the JS bridge
-webview = QtWebView2Widget(parent=window, js_apis=js_bridge)
+webview = QtWebViewWidget(url="https://example.com", parent=win)
 layout.addWidget(webview)
 
+win.show()
+sys.exit(app.exec())
+```
 
-# 4. (JS -> Python) Define a Python function and expose it to JavaScript
+### JS Bridge — Python ↔ JavaScript
+
+Expose Python functions to JavaScript with `DictJsBridge`. JS calls Python via
+`window.qtwebview.api.funcName()` — with full `Promise` / `async` / `await` support.
+
+```python
+import sys
+from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
+from qtpy.QtCore import Slot
+from qtwebview2 import QtWebViewWidget, DictJsBridge
+
+app = QApplication(sys.argv)
+win = QWidget()
+win.setWindowTitle("JS Bridge Demo")
+win.resize(800, 600)
+layout = QVBoxLayout(win)
+
+# 1. Create the JS bridge and register Python functions
+js_bridge = DictJsBridge()
+
 @js_bridge.bind_js_api_func
-def get_user_os():
-    """This Python function will be callable from JavaScript."""
-    print(f"Python function 'get_user_os' was called from JavaScript!")
-    return sys.platform
+def get_system_info():
+    """Callable from JS: await window.qtwebview.api.get_system_info()"""
+    import platform
+    return {
+        "os": platform.system(),
+        "python": platform.python_version(),
+        "arch": platform.machine(),
+    }
 
+@js_bridge.bind_js_api_func
+def greet(name: str):
+    """Callable from JS: await window.qtwebview.api.greet('World')"""
+    return f"Hello, {name}! — from Python"
 
-# 5. Define HTML content that includes JavaScript to call the Python function
-html_content = """
+# 2. Create the webview with the bridge
+webview = QtWebViewWidget(parent=win, js_apis=js_bridge)
+layout.addWidget(webview)
+
+# 3. Load HTML that uses the bridge
+webview.load_html("""
 <!DOCTYPE html>
 <html>
-<head><title>JS Bridge Test</title></head>
-<body style="font-family: sans-serif; text-align: center; background-color: #f0f0f0;">
-    <h1>QtWebView2 JS Bridge Demo</h1>
-    <button onclick="callPython()">Click me to call Python!</button>
-    <p>Result from Python: <b id="result">...</b></p>
+<head><meta charset="utf-8"><title>JS Bridge</title></head>
+<body style="font-family: sans-serif; text-align: center; padding: 40px;">
+    <h1>🐍 Python ↔ JavaScript</h1>
+    <button onclick="callPython()" style="padding:12px 24px; font-size:16px;">
+        Call Python
+    </button>
+    <pre id="output" style="margin-top:20px; text-align:left; background:#1e1e1e;
+        color:#4ec9b0; padding:16px; border-radius:8px; min-height:80px;">
+// click the button...
+    </pre>
     <script>
         async function callPython() {
+            const out = document.getElementById('output');
+            out.textContent = '// calling...';
             try {
-                // Use async/await to call the Python function and get the result
-                const os = await window.qtwebview2.api.get_user_os();
-                document.getElementById('result').textContent = os;
+                const info = await window.qtwebview.api.get_system_info();
+                const msg  = await window.qtwebview.api.greet('Qt');
+                out.textContent = JSON.stringify(info, null, 2) + '\n\n' + msg;
             } catch (e) {
-                document.getElementById('result').textContent = 'Error: ' + e;
+                out.textContent = 'Error: ' + e;
             }
         }
     </script>
 </body>
 </html>
-"""
+""")
 
-webview.load_html(html_content)
+# 4. Python → JS: execute JavaScript when the page loads
+@Slot(str, str)
+def on_page_loaded(evt, url):
+    if evt == "Finished":
+        webview.eval_js(
+            'document.body.style.background = "linear-gradient(135deg, #667eea, #764ba2)"'
+        )
 
+webview.signals.page_loaded.connect(on_page_loaded)
 
-# 6. (Python -> JS) Connect to a signal and execute JavaScript when it's emitted
-@Slot()
-def on_dom_loaded():
-    """This function is called when the web page's DOM is fully loaded."""
-    print(f"DOM content loaded. Executing JS from Python...")
-    # You can also execute JavaScript from Python
-    webview.evaluate_js("""(function() {
-        const new_element = document.createElement('h2');
-        new_element.textContent = 'Hello from Python!';
-        document.body.appendChild(new_element);
-    })()""")
-
-
-webview.bridge.domContentLoaded.connect(on_dom_loaded)
-
-window.show()
+win.show()
 sys.exit(app.exec())
 ```
 
-A WSGI Demo(need flask):
+### WSGI — Flask / Bottle / Django
+
+Run your WSGI app inside the webview. Requests are served via custom protocol
+(`qtwebview://` scheme) — no TCP port, zero network overhead. Or switch to
+localhost mode with `wsgi_scheme="localhost"`.
 
 ```python
 import sys
@@ -140,74 +160,71 @@ from datetime import datetime
 
 from flask import Flask, jsonify, render_template_string
 
-from qtpy.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, QFrame
+from qtpy.QtWidgets import (QApplication, QVBoxLayout, QHBoxLayout,
+                             QWidget, QLabel, QPushButton, QFrame)
 from qtpy.QtCore import Qt
-from qtwebview2 import QtWebView2Widget
+from qtwebview2 import QtWebViewWidget
 
-
+# ── Flask app ───────────────────────────────────────────────────────
 flask_app = Flask(__name__)
-
-VIRTUAL_HOST = "myapp.local"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            padding: 0; margin: 0; 
-            background: #f5f7fa; color: #2c3e50; 
-            display: flex; justify-content: center; align-items: center; height: 100vh;
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         Helvetica, Arial, sans-serif;
+            background: #f5f7fa; color: #2c3e50;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh;
         }
-        .container { 
-            background: white; width: 80%; max-width: 600px;
-            padding: 40px; border-radius: 12px; 
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08); 
-            text-align: center;
+        .card {
+            background: #fff; width: 90%; max-width: 520px;
+            padding: 40px; border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08); text-align: center;
         }
-        h1 { margin-top: 0; color: #34495e; }
-        .tag { 
-            background: #e1f5fe; color: #0288d1; 
-            padding: 4px 8px; border-radius: 4px; font-size: 0.9em; font-weight: bold;
+        h1 { color: #34495e; margin-bottom: 8px; }
+        .tag {
+            display: inline-block; background: #e1f5fe; color: #0288d1;
+            padding: 3px 8px; border-radius: 4px; font-size: 0.85em;
+            font-weight: 600; margin-bottom: 20px;
         }
-        button { 
-            padding: 12px 24px; background: #00c853; color: white; 
-            border: none; border-radius: 6px; cursor: pointer; font-size: 16px;
-            transition: background 0.2s;
+        button {
+            padding: 10px 24px; background: #00c853; color: #fff;
+            border: none; border-radius: 6px; cursor: pointer; font-size: 15px;
+            transition: background 0.2s; margin-top: 16px;
         }
         button:hover { background: #00e676; }
         #result-box {
-            margin-top: 20px; padding: 15px; background: #263238; color: #80cbc4;
-            border-radius: 6px; font-family: monospace; text-align: left; min-height: 60px;
+            margin-top: 20px; padding: 16px; background: #263238;
+            color: #80cbc4; border-radius: 6px; font-family: "Fira Code",
+            "Cascadia Code", Consolas, monospace; text-align: left;
+            min-height: 60px; white-space: pre-wrap; font-size: 13px;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🐍 Flask + 🖥️ WebView2</h1>
-        <p>This is a running in Qt memory <span class="tag">WSGI App</span></p>
+    <div class="card">
+        <h1>🐍 Flask + 🖥️ QtWebView</h1>
+        <span class="tag">WSGI · Custom Protocol</span>
         <p>Server Time: <strong>{{ time }}</strong></p>
-
-        <div style="margin: 30px 0;">
-            <button onclick="fetchData()">⚡ Initiate a fetch request</button>
-        </div>
-
-        <div id="result-box">// Click the button to get the JSON data...</div>
+        <button onclick="fetchData()">⚡ Fetch JSON from Flask</button>
+        <div id="result-box">// Click the button...</div>
     </div>
-
     <script>
         async function fetchData() {
             const box = document.getElementById('result-box');
-            box.textContent = "// Loading...";
+            box.textContent = '// Loading...';
             try {
-                const res = await fetch('/api/random', {method: 'POST'});
+                const res = await fetch('/api/random', { method: 'POST' });
                 const data = await res.json();
                 box.textContent = JSON.stringify(data, null, 2);
-            } catch(e) {
-                box.textContent = "Error: " + e;
+            } catch (e) {
+                box.textContent = 'Error: ' + e;
             }
         }
     </script>
@@ -215,144 +232,157 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
-@flask_app.route('/')
+@flask_app.route("/")
 def index():
-    return render_template_string(HTML_TEMPLATE, time=datetime.now().strftime("%H:%M:%S"))
+    return render_template_string(HTML_TEMPLATE,
+                                  time=datetime.now().strftime("%H:%M:%S"))
 
-
-@flask_app.route('/api/random', methods=['POST'])
+@flask_app.route("/api/random", methods=["POST"])
 def api_random():
     return jsonify({
         "value": random.randint(1000, 9999),
-        "source": "Internal Flask Backend",
-        "status": "success"
+        "source": "Flask Backend",
+        "status": "success",
     })
 
 
+# ── Qt Window ───────────────────────────────────────────────────────
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("QtWebView2 WSGI Demo")
-        self.resize(1000, 700)
+        self.setWindowTitle("QtWebView WSGI Demo")
+        self.resize(900, 640)
 
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        self.top_bar = QFrame()
-        self.top_bar.setFixedHeight(50)
-        self.top_bar.setStyleSheet("""
-            QFrame { background-color: #ffffff; border-bottom: 1px solid #e0e0e0; }
-            QLabel { color: #333; font-size: 14px; font-weight: bold; }
+        # Toolbar
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("""
+            QFrame { background: #fff; border-bottom: 1px solid #e0e0e0; }
+            QLabel { color: #333; font-size: 13px; font-weight: 600; }
             QPushButton {
-                background-color: transparent; border: 1px solid #ccc; border-radius: 4px;
-                padding: 5px 15px; color: #555;
+                background: transparent; border: 1px solid #ccc;
+                border-radius: 4px; padding: 4px 14px; color: #555;
             }
-            QPushButton:hover { background-color: #f0f0f0; color: #000; }
+            QPushButton:hover { background: #f0f0f0; color: #000; }
         """)
-
-        bar_layout = QHBoxLayout(self.top_bar)
-        bar_layout.setContentsMargins(15, 0, 15, 0)
-
-        title_label = QLabel("🚀 QtWebView2 Demo")
-
-        self.status_label = QLabel("🟢 WSGI Server Running")
-        self.status_label.setStyleSheet("color: #4caf50; font-size: 12px; font-weight: normal;")
-
-        refresh_btn = QPushButton("Reload")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.clicked.connect(self.reload_webview)
-
-        bar_layout.addWidget(title_label)
-        bar_layout.addSpacing(20)
-        bar_layout.addWidget(self.status_label)
+        bar_layout = QHBoxLayout(bar)
+        bar_layout.setContentsMargins(12, 0, 12, 0)
+        bar_layout.addWidget(QLabel("🚀 QtWebView WSGI Demo"))
         bar_layout.addStretch()
-        bar_layout.addWidget(refresh_btn)
+        reload_btn = QPushButton("Reload")
+        reload_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reload_btn.clicked.connect(self._reload)
+        bar_layout.addWidget(reload_btn)
+        layout.addWidget(bar)
 
-        self.webview = QtWebView2Widget(
-            parent=self,
-            wsgi_app=flask_app,
-            wsgi_host_name=VIRTUAL_HOST,
-            debug=True,
-            url=f"http://{VIRTUAL_HOST}/"
+        # WebView — WSGI served via qtwebview:// scheme
+        self.webview = QtWebViewWidget(
+            parent=self, wsgi_app=flask_app, debug=True
         )
+        layout.addWidget(self.webview, 1)
 
-        main_layout.addWidget(self.top_bar)
-
-        main_layout.addWidget(self.webview, 1)
-
-    def reload_webview(self):
+    def _reload(self):
         self.webview.reload()
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
-    window = MainWindow()
-    window.show()
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec())
 ```
 
-## 📦 Packaging
+## 📊 Quick Comparison
 
-When packaging your application, ensure the files under `qtwebview2/lib/` are included — they contain the .NET assemblies and native DLLs required at runtime.
+|                    | QtWebView (v0.6.0+)          | pywebview       | QWebEngineView  |
+|--------------------|------------------------------|-----------------|-----------------|
+| **Qt Integration** | ✅ Native QWidget             | ⚠️ Pseudo-embed | ✅ Native        |
+| **Cross-Platform** | ✅ Win/Mac/Linux              | ✅               | ✅               |
+| **Package Size**   | ✅ Small (wryview .pyd)       | Small           | ❌ Large (~80MB) |
+| **WSGI**           | ✅ Custom protocol (portless) | Local HTTP      | QWebChannel     |
+| **JS Bridge**      | ✅ Promise/async              | ✅               | ⚠️ Complex      |
+| **Startup**        | ~1.5s                        | ~1~3s           | ~2-3s           |
 
-| Packager | Notes |
-|----------|-------|
-| **PyInstaller** | No action needed — a hook is shipped with the package and runs automatically. |
-| **Nuitka** | Add `--user-package-configuration-file=nuitka-package.config.yml` with the config below, and `--nofollow-import-to=Microsoft,System` to avoid CLR import issues. |
-| **Others** | Ensure the `lib/` directory remains in its original position under the `qtwebview2` package so the DLLs can be located at runtime. Refer to your packager's documentation for how to include package data. |
+## 🔄 Migration from v0.5.x
 
-<details>
-<summary>Nuitka config (nuitka-package.config.yml)</summary>
+```python
+# Old (v0.5.x)                            → New (v0.6.0)
+from qtwebview2 import QtWebView2Widget    from qtwebview2 import QtWebViewWidget
+webview = QtWebView2Widget(url=...)        webview = QtWebViewWidget(url=...)
 
-```yaml
-- module-name: 'qtwebview2'
-  data-files:
-    - dirs:
-        - 'lib'
-  dlls:
-    - from_filenames:
-        relative_path: 'lib/runtimes/win-x86/native'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_x86'
-    - from_filenames:
-        relative_path: 'lib/runtimes/win-x64/native'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_amd64'
-    - from_filenames:
-        relative_path: 'lib/runtimes/win-arm64/native'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_arm64'
-    - from_filenames:
-        relative_path: 'lib/x86'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_x86'
-    - from_filenames:
-        relative_path: 'lib/x64'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_amd64'
-    - from_filenames:
-        relative_path: 'lib/arm64'
-        prefixes:
-          - 'WebView2Loader'
-      when: 'win32 and arch_arm64'
-    - from_filenames:
-        relative_path: 'lib'
-        prefixes:
-          - 'Microsoft.'
-      when: 'win32'
+# Parameters with different names:
+# handle_new_window=True/False   → new_window_handler=lambda url: "allow"|"deny"
+# wsgi_host_name="myapp.local"   → wsgi_scheme="qtwebview"
+# browser_executable_folder=...  → (not supported by wry)
+# fullscreen_support=True        → (not yet implemented)
+# no_local_storage=True          → (removed, use incognito=True)
+
+# Removed parameters (no equivalent):
+# context_menus, init_settings_hook
+
+# New parameters in v0.6.0:
+# html, headers, navigation_handler, incognito, autoplay,
+# javascript_enabled, hotkeys_zoom, drag_drop_handler
 ```
-</details>
+
+## 📦 API Overview
+
+```python
+webview = QtWebViewWidget(
+    url="https://example.com",           # initial URL
+    html="<h1>Hello</h1>",               # or initial HTML
+    headers={"Authorization": "Bearer"},  # custom HTTP headers
+    user_agent="CustomAgent/1.0",
+    debug=True,                            # DevTools on
+    transparent=False,
+    background_color="#1e1e1e",
+    navigation_handler=lambda url: True,   # return False to block
+    new_window_handler=lambda url: "allow",
+    lazyload=True,                         # defer to showEvent
+    incognito=False,
+    user_data_folder="/path/to/cache",
+    wsgi_app=flask_app,
+    wsgi_scheme="qtwebview",
+    autoplay=False,
+    javascript_enabled=True,
+    hotkeys_zoom=True,
+    drag_drop_handler=lambda evt, paths, pos: True,
+)
+
+webview.load_url(url)                     # Navigate
+webview.load_url_with_headers(url, hdrs)  # Navigate with headers
+webview.load_html(html)                   # Load HTML
+webview.reload()                          # Reload
+webview.url()                             # Get current URL
+webview.eval_js(script)                   # Execute JS
+webview.evaluate_js(script, callback)     # Execute JS with callback
+webview.cookies()                         # Get all cookies
+webview.cookies_for_url(url)              # Get cookies for a URL
+webview.set_cookie(name, value)           # Set cookie
+webview.delete_cookie(name, url)          # Delete cookie
+webview.open_devtools()                   # Open DevTools
+webview.close_devtools()                  # Close DevTools
+webview.zoom(1.5)                         # Zoom 150%
+webview.print()                           # Print page
+webview.focus()                           # Focus webview
+webview.set_background_color(r, g, b, a)  # Set background color
+webview.clear_all_browsing_data()         # Clear cache
+
+# Signals
+webview.signals.page_loaded.connect(lambda evt, url: ...)
+webview.signals.title_changed.connect(lambda title: ...)
+webview.signals.navigation_requested.connect(lambda url: ...)
+webview.signals.new_window_requested.connect(lambda url: ...)
+webview.signals.web_message_received.connect(lambda msg: ...)
+webview.signals.initialization_done.connect(lambda: ...)
+```
 
 ## License
 
 Copyright (c) 2025-2026 Xiaosu.
 
-Distributed under the terms of the [Mozilla Public License Version 2.0](https://github.com/xiaosuyyds/QtWebView2/blob/master/LICENSE).
+Distributed under the terms of the [Mozilla Public License Version 2.0](https://github.com/xiaosuawa/QtWebView/blob/master/LICENSE).

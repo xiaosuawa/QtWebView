@@ -1,625 +1,606 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
+"""
+QtWebView — Qt webview widget powered by wryview (wry).
+
+Cross-platform (Windows/macOS/Linux). Embeds a wry WebView as a native
+child window inside any Qt widget.
+"""
+
 from __future__ import annotations
 
+__lazy_modules__ = ["wryview"]
+
+import functools
 import json
-import os
-import threading
+import logging
 import typing
-import uuid
-import webbrowser
-import concurrent.futures
+from io import BytesIO
 from typing import Callable, Any, Optional, Union
+from typing_extensions import deprecated
+from qtpy.QtCore import Qt, QObject, Signal, QTimer, QStandardPaths
+from qtpy.QtWidgets import QWidget
+from wryview import WebView
 
-from qtpy.QtCore import Slot, QObject, Signal, QCoreApplication, QTimer, QStandardPaths
-from qtpy.QtWidgets import QWidget, QVBoxLayout
-from qtpy.QtGui import QWindow
-
-from .logger import logger
-from . import exceptions
-from . import _dotnet_bridge as dotnet
+logger = logging.getLogger(__name__)
 
 
-class QtWebView2ApiBridge(QObject):
-    """
-    Helper QObject to safely pass signals from the .NET thread to the Qt main GUI thread.
-    """
-    initialization_done = Signal(bool, str)  # Parameters: success, error_message
-    web_message_received = Signal(str)  # Parameters: message
-    js_evaluation_result = Signal(str, str)  # Parameters: call_id, result_json
-    async_result_ready = Signal(dict, str)  # Parameters: result, call_id
-    execute_js_from_thread = Signal(str)  # Parameters: js_code
-    domContentLoaded = Signal()
-    fullscreen_changed = Signal(bool)  # Parameters: is_fullscreen
+# ═══════════════════════════════════════════════════════════════════════════════
+# JS Bridge
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class QtWebViewSignals(QObject):
+    """Signals emitted by QtWebViewWidget."""
+    # WebView events
+    initialization_done = Signal()
+    page_loaded = Signal(str, str)  # (event: "Started"|"Finished", url)
+    title_changed = Signal(str)  # (title)
+    navigation_requested = Signal(str)  # (url)
+    new_window_requested = Signal(str)  # (url)
+    # JS IPC
+    web_message_received = Signal(str)  # (json_message)
+
+
+@deprecated("Use QtWebViewSignals instead")
+class QtWebView2ApiBridge(QtWebViewSignals):
+    ...
 
 
 JSONSerializable = Union[dict[str, "JSONSerializable"], list["JSONSerializable"], str, int, float, bool, None]
 
 
 @typing.runtime_checkable
-class QtWebView2JsBridge(typing.Protocol):
+class QtWebViewJsBridge(typing.Protocol):
     def __call__(self, name, *arg) -> Union[JSONSerializable, Callable[[Callable[[JSONSerializable], Any], Any], Any]]:
         ...
 
 
+@deprecated("Use QtWebViewJsBridge instead")
+class QtWebView2JsBridge(QtWebViewJsBridge):
+    ...
+
+
 class DictJsBridge:
+    """Dictionary-based JS API bridge — Python functions callable from JS."""
+
     def __init__(self, js_apis: Optional[dict[str, Callable[..., JSONSerializable]]] = None):
-        self.js_apis = js_apis if js_apis is not None else {}
+        self.js_apis = js_apis or {}
 
     def __call__(self, name, *arg) -> Union[JSONSerializable, Callable[[Callable[[JSONSerializable], Any], Any], Any]]:
         if name in self.js_apis:
-            # For asynchronous functions, return the function itself
-            if hasattr(self.js_apis[name], 'async_func'):
-                return self.js_apis[name]
-            # For synchronous functions, call directly and return the result
-            return self.js_apis[name](*arg)
-        else:
-            raise ValueError(f"Undefined JS API: {name}")
+            fn = self.js_apis[name]
+            if hasattr(fn, "async_func"):
+                return fn
+            return fn(*arg)
+        raise ValueError(f"Undefined JS API: {name}")
 
     def bind_js_api_func(self, func: Callable, async_func: bool = False, name: Optional[str] = None):
         """ Decorator to bind a Python function to the JS API. """
         name = name or func.__name__
         if async_func:
-            setattr(func, 'async_func', True)
+            setattr(func, "async_func", True)
         self.js_apis[name] = func
         return func
 
 
-class QtWebView2Widget(QWidget):
-    """
-    QtPy WebView2 Widget
+_JS_BRIDGE = """
+(function() {
+    if (window.qtwebview || window.qtwebview2) return;
+    var pending = {};
+
+    function genId() {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+
+    window.qtwebview = window.qtwebview2 = {
+        api: new Proxy({}, {
+            get: function(target, prop) {
+                return function() {
+                    var callId = genId();
+                    var args = Array.prototype.slice.call(arguments);
+                    return new Promise(function(resolve, reject) {
+                        pending[callId] = {resolve: resolve, reject: reject};
+                        window.ipc.postMessage(JSON.stringify({
+                            type: "qtwebview", name: prop, params: args, id: callId
+                        }));
+                    });
+                };
+            }
+        })
+    };
+
+    // Listen for Python responses via CustomEvent
+    window.addEventListener('qtwebview-response', function(e) {
+        if (!e.detail) return;
+        var data = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail;
+        for (var id in pending) {
+            if (data.id === id || (data.result !== undefined && pending[id])) {
+                pending[id].resolve(data.result);
+                delete pending[id];
+                return;
+            }
+            if (data.error) {
+                pending[id].reject(new Error(data.error));
+                delete pending[id];
+                return;
+            }
+        }
+    });
+})();
+"""
+
+
+def _require_webview(error_if_not_ready: bool = False):
+    """Decorator: if webview not ready, queue call or raise error.
+
+    Args:
+        error_if_not_ready: If True, raise RuntimeError instead of queuing.
+            Use for methods that return values (cookies, url, etc.).
     """
 
-    _wsgi_response_ready = Signal(object, object, str, list, object)
-    _init_webview2_signal = Signal()
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            if self.is_ready:
+                return method(self, *args, **kwargs)
+            if error_if_not_ready:
+                raise RuntimeError(f"{method.__name__}(): WebView not initialized")
+            self._pending_calls.append((method.__name__, args, kwargs))
+            return None
 
+        return wrapper
+
+    return decorator
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# The Widget
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class QtWebViewWidget(QWidget):
     def __init__(
             self,
             url: Optional[str] = None,
+            html: Optional[str] = None,
+            headers: Optional[Union[dict[str, str], list[tuple[str, str]]]] = None,
             user_agent: Optional[str] = None,
             debug: bool = False,
-            context_menus: bool = False,
             transparent: bool = False,
             background_color: Optional[str] = None,
-            handle_new_window: bool = True,
+            navigation_handler: Optional[Callable[[str], bool]] = None,
+            new_window_handler: Optional[Callable[[str], str]] = None,
             lazyload: bool = True,
-            js_apis: Union[dict[str, Callable[..., Any]], QtWebView2JsBridge, None] = None,
+            js_apis: Union[dict[str, Callable[..., Any]], QtWebViewJsBridge, None] = None,
             user_data_folder: Optional[str] = None,
-            no_local_storage: bool = False,
+            incognito: bool = False,
             wsgi_app: Optional[Callable[..., Any]] = None,
-            wsgi_host_name: Optional[str] = None,
-            wsgi_executor: Union[concurrent.futures.Executor, int] = 8,
-            init_settings_hook: Optional[Callable[[Any], None]] = None,
-            fullscreen_support: bool = True,
-            browser_executable_folder: Optional[str] = None,
+            wsgi_scheme: Optional[str] = None,
+            wsgi_executor: Optional[int] = None,
+            autoplay: bool = False,
+            javascript_enabled: bool = True,
+            hotkeys_zoom: bool = True,
+            drag_drop_handler: Optional[Callable[[str, list, tuple], bool]] = None,
             parent: Optional[QWidget] = None,
     ):
         """
-        QtPy WebView2 Widget
-        :param url: The target URL
-        :param user_agent: User-Agent string for the request header, defaults if left empty
-        :param debug: Whether to enable debug mode. Disabling it will turn off hotkeys and dev tools. If disabled, it's
-          recommended to also disable context_menus.
-        :param context_menus: Whether to enable the right-click context menu
-        :param transparent: Whether to use transparent mode (this has a bug when switching pages; remember to set the
-          body's background color style to transparent for it to work)
-        :param background_color: Background color, conflicts with transparent
-        :param handle_new_window: Whether to handle new windows. If enabled, the target URL will be opened in the user's
-          default browser
-        :param lazyload: Whether to lazy load. Enabled by default. If enabled, webview2 will only be loaded when the
-          widget becomes visible for the first time.
-        :param js_apis: JS API, can be a dictionary or a class conforming to the QtWebView2JsBridge protocol. A
-          dictionary will be automatically converted to DictJsBridge. If not provided, an empty DictJsBridge is created.
-        :param user_data_folder: User data directory. If not provided, it will be generated automatically.
-        :param no_local_storage: Whether to disable local storage. Note: Disabling it may affect performance.
-        :param wsgi_app: If provided, the network request from WebView2 will be intercepted and handed over to the
-          provided WSGI App for processing
-        :param wsgi_host_name: If provided, only requests that meet the wsgi_host_name will be handed over to the
-          WSGI App for processing
-        :param wsgi_executor: If provided a thread pool executor,
-          the WSGI App will be executed in the provided executor.
-          If provided a number, the WSGI App will be executed in a thread pool executor
-          with the specified number of threads. defaults to 8
-        :param init_settings_hook: A callback function that takes 'CoreWebView2' as an argument.
-          Executed before loading the URL but after initialization.
-        :param fullscreen_support: If True, automatically handles window fullscreen toggling when
-          the web element requests fullscreen.
-        :param browser_executable_folder: Path to a fixed-version WebView2 runtime. When provided,
-          the bundled runtime is used instead of the system's Evergreen runtime. The path should
-          point to a folder containing msedgewebview2.exe.
-        :param parent: Parent widget
+        Cross-platform webview widget for Qt, powered by wryview (wry).
+
+        :param url: The initial URL to load.
+        :param user_agent: Custom User-Agent string.
+        :param debug: Enable DevTools and browser accelerator keys.
+        :param transparent: Enable transparent background mode.
+        :param background_color: Background color as hex string (e.g. "#1e1e1e").
+        :param navigation_handler: Callable(url) → bool. Return False to block navigation.
+        :param new_window_handler: Callable(url) → "allow" | "deny".
+        :param lazyload: Defer WebView creation to showEvent. Window appears instantly,
+            WebView loads after. Enabled by default.
+        :param js_apis: Dict or DictJsBridge exposing Python functions to JavaScript
+            via ``window.qtwebview.api``.
+        :param user_data_folder: Path for persistent WebView2 user data (cache, cookies).
+            Defaults to Qt's AppLocalDataLocation.
+        :param incognito: Use incognito mode. No cache or cookies persisted.
+            Overrides *user_data_folder*.
+        :param wsgi_app: A WSGI-compatible app (Flask, Bottle, Django, etc.). Requests
+            are served via custom protocol (default scheme ``qtwebview://``) or localhost
+            TCP if ``wsgi_scheme="localhost"``.
+        :param wsgi_executor: Number of threads for WSGI request pool. Default 8.
+        :param wsgi_scheme: Custom protocol scheme for WSGI. Default ``"qtwebview"``.
+            Use ``"localhost"`` to switch to a TCP server on 127.0.0.1 with auto port.
+        :param autoplay: Allow autoplay of media. Default False.
+        :param javascript_enabled: Enable JavaScript. Default True.
+        :param hotkeys_zoom: Enable Ctrl+/- zoom. Default True.
+        :param drag_drop_handler: Callable(evt_type, paths, position) → bool.
+        :param parent: Parent Qt widget.
         """
         super().__init__(parent)
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(0)
 
-        self._init_webview2_signal.connect(self._init_webview)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
 
-        self._lazyload = lazyload
-        if self._lazyload and not dotnet.dotnet_load_flag:
-            threading.Thread(target=dotnet.load_dotnet_env, daemon=True).start()
-
-        # --- Configuration Properties ---
-        self.url = url
-        if isinstance(js_apis, dict) or js_apis is None:
-            self.js_api: QtWebView2JsBridge = DictJsBridge(js_apis)
-        elif isinstance(js_apis, QtWebView2JsBridge):
-            self.js_api: QtWebView2JsBridge = js_apis
-        else:
-            raise TypeError("The js_apis parameter must be a dictionary or a QtWebView2JsBridge compatible object")
-
-        self.wsgi_app = wsgi_app
-        self.wsgi_host_name = wsgi_host_name or "qtwebview2.local"
-        self._wsgi_server = None
-        if isinstance(wsgi_executor, int):
-            self._wsgi_executor = concurrent.futures.ThreadPoolExecutor(max_workers=wsgi_executor)
-        elif isinstance(wsgi_executor, concurrent.futures.Executor):
-            self._wsgi_executor = wsgi_executor
-        else:
-            raise TypeError("The wsgi_executor parameter must be a thread pool executor or an integer")
-
-        self._wsgi_response_ready.connect(self._finalize_wsgi_response)
-
-        if self.wsgi_app and not self.wsgi_host_name:
-            raise ValueError("wsgi_host_name must be provided when wsgi_app is set.")
-
-        self.is_ready = False
+        # ── Config ──
+        self._url = url
         self._user_agent = user_agent
-        self._debug_enabled = debug
-        self._context_menus_enabled = context_menus
-        self._is_transparent = transparent
-        self.background_color = background_color
-        self._handle_new_window = handle_new_window
+        self._debug = debug
+        self._transparent = transparent
+        self._bg_color = background_color
+        self._wsgi_app = wsgi_app
+        self._wsgi_scheme = wsgi_scheme
+        self._wsgi_executor = wsgi_executor
+        self._wsgi_port = None
+        self._html = html
+        self._headers = headers
+        self._lazyload = lazyload
         self._user_data_folder = user_data_folder
-        self._no_local_storage = no_local_storage
-        self._init_settings_hook = init_settings_hook
-        self._fullscreen_support = fullscreen_support
-        self._browser_executable_folder = browser_executable_folder
+        self._incognito = incognito
+        self._autoplay = autoplay
+        self._javascript_enabled = javascript_enabled
+        self._hotkeys_zoom = hotkeys_zoom
+        self._drag_drop_handler = drag_drop_handler
+        self.navigation_handler = navigation_handler
+        self.newWindow_handler = new_window_handler
 
-        # --- Internal State ---
-        if typing.TYPE_CHECKING:
-            self._webview: Optional[dotnet.WinForms.WebView2] = None
+        # JS bridge
+        if isinstance(js_apis, dict) or js_apis is None:
+            self.js_api: QtWebViewJsBridge = DictJsBridge(js_apis)
+        elif isinstance(js_apis, QtWebViewJsBridge):
+            self.js_api: QtWebViewJsBridge = js_apis
         else:
-            self._webview = None
-        self._js_callbacks: dict[str, Callable[..., Any]] = {}
-        self._saved_window_state = None
+            raise TypeError("js_apis must be a dict or DictJsBridge")
 
-        # Thread-safe signal bridge
-        self.bridge = QtWebView2ApiBridge(self)
-        self.bridge.initialization_done.connect(self._on_initialization_completed)
-        self.bridge.web_message_received.connect(self._on_web_message_received)
-        self.bridge.js_evaluation_result.connect(self._on_js_evaluation_result)
-        self.bridge.async_result_ready.connect(self._return_result_to_js)
-        self.bridge.execute_js_from_thread.connect(self._execute_script_in_main_thread)
+        self.signals = QtWebViewSignals(self)
+        self.bridge = self.signals
 
-        if self._fullscreen_support:
-            self.bridge.fullscreen_changed.connect(self._default_on_fullscreen_change)
+        # ── Create webview (deferred to thread for fast startup) ──
+        self._webview: Optional[WebView] = None
+        self._pending_calls: list[tuple[str, tuple, dict]] = []
 
         if not self._lazyload:
-            QTimer.singleShot(0, self._init_webview)
+            self._start_webview()
 
-        self._pending_calls = []  # Store calls made before initialization
-        self._has_shown = False
+    # ── WebView creation ────────────────────────────────────────────────────
+
+    def _start_webview(self):
+        """Launch WebView2 init in background thread, finish on main thread."""
+        hwnd = int(self.winId())
+
+        kwargs: dict = {
+            "initialization_script": _JS_BRIDGE,
+            "devtools": self._debug,
+            "transparent": self._transparent,
+            "incognito": self._incognito,
+            "autoplay": self._autoplay,
+            "javascript_enabled": self._javascript_enabled,
+            "hotkeys_zoom": self._hotkeys_zoom,
+        }
+        if self._drag_drop_handler:
+            kwargs["drag_drop_handler"] = self._drag_drop_handler
+        # Auto-generate cache directory unless incognito
+        if self._incognito:
+            if self._user_data_folder:
+                logger.warning("user_data_folder is ignored when incognito=True")
+        else:
+            data_dir = self._user_data_folder
+            if not data_dir:
+                data_dir = QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.AppLocalDataLocation
+                )
+                if data_dir:
+                    data_dir = f"{data_dir}/QtWebView/"
+            logger.debug(f"WebView DataFolder: {data_dir}")
+            kwargs["data_directory"] = data_dir
+        if self._user_agent:
+            kwargs["user_agent"] = self._user_agent
+        if self._bg_color:
+            c = self._bg_color.lstrip("#")
+            if len(c) == 6:
+                kwargs["background_color"] = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16), 255)
+
+        # Thread pool for WSGI — callbacks are on main thread
+        from concurrent.futures import ThreadPoolExecutor
+        self._wsgi_pool = ThreadPoolExecutor(max_workers=self._wsgi_executor or 8)
+
+        if self._wsgi_app:
+            if self._wsgi_scheme == "localhost":
+                from wsgiref.simple_server import make_server, WSGIServer
+                from socketserver import ThreadingMixIn
+                import threading
+
+                class ThreadedServer(ThreadingMixIn, WSGIServer):
+                    daemon_threads = True
+
+                server = make_server("127.0.0.1", 0, self._wsgi_app, server_class=ThreadedServer)
+                self._wsgi_port = server.server_port
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                logger.info("WSGI on http://127.0.0.1:%d", self._wsgi_port)
+            else:
+                scheme = self._wsgi_scheme or "qtwebview"
+                kwargs["custom_protocols"] = {scheme: self._wsgi_handler}
+                self._wsgi_scheme = scheme
+                logger.info("WSGI custom protocol: %s://", scheme)
+
+        kwargs["ipc_handler"] = self._on_ipc
+        kwargs["on_page_load"] = lambda evt, url: self.bridge.page_loaded.emit(evt, url)
+        kwargs["on_title_changed"] = lambda title: self.bridge.title_changed.emit(title)
+        kwargs["on_navigation"] = lambda url: (
+            self.bridge.navigation_requested.emit(url),
+            self.navigation_handler(url) if self.navigation_handler else True
+        )[1]
+        kwargs["on_new_window"] = lambda url: (
+            self.bridge.new_window_requested.emit(url),
+            self.newWindow_handler(url) if self.newWindow_handler else "allow"
+        )[1]
+
+        if self._html:
+            kwargs["html"] = self._html
+        if self._user_data_folder:
+            kwargs["data_directory"] = self._user_data_folder
+
+        if self._wsgi_port:
+            kwargs["url"] = f"http://127.0.0.1:{self._wsgi_port}/"
+        elif self._wsgi_scheme:
+            kwargs["url"] = f"{self._wsgi_scheme}://localhost/"
+        elif self._url:
+            kwargs["url"] = self._url
+
+        if self._headers:
+            kwargs["headers"] = self._headers
+
+        self._webview = WebView(hwnd, **kwargs)
+
+        r = self.rect()
+        self._webview.set_bounds(0, 0, r.width(), r.height())
+
+        # Flush pending calls
+        for name, args, kwargs in self._pending_calls:
+            getattr(self, name)(*args, **kwargs)
+        self._pending_calls.clear()
+
+        self.signals.initialization_done.emit()
+
+    # ── IPC ──────────────────────────────────────────────────────────────────
+
+    def _on_ipc(self, msg: str):
+        self.signals.web_message_received.emit(msg)
+        try:
+            data = json.loads(msg)
+            # Only process internal bridge calls
+            if data.get("type") != "qtwebview":
+                return
+
+            func_name = data.get("name", "")
+            params = data.get("params", [])
+            call_id = data.get("id", "")
+
+            if func_name == "call":
+                func_name = params[0] if params else ""
+                params = params[1:] if len(params) > 1 else []
+
+            if not func_name or not call_id:
+                return
+
+            try:
+                res = self.js_api(func_name, *params)
+                if callable(res):
+                    res(lambda result: self._return_to_js(result, call_id))
+                else:
+                    self._return_to_js(res, call_id)
+            except Exception as e:
+                logger.error("JS API '%s' error: %s", func_name, e, exc_info=True)
+                self._return_js_error(repr(e), call_id)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            self.signals.web_message_received.emit(msg)
+            logger.debug("Raw IPC: %.200s", msg)
+
+    def _return_to_js(self, result: Any, call_id: str):
+        payload = json.dumps({"id": call_id, "result": result})
+        self._webview.eval_js(
+            f"window.dispatchEvent(new CustomEvent('qtwebview-response', {{detail: {payload}}}));"
+        )
+
+    def _return_js_error(self, error: str, call_id: str):
+        payload = json.dumps({"id": call_id, "error": error})
+        self._webview.eval_js(
+            f"window.dispatchEvent(new CustomEvent('qtwebview-response', {{detail: {payload}}}));"
+        )
+
+    # ── WSGI ────────────────────────────────────────────────────────────────
+
+    def _wsgi_handler(
+            self, method: str, uri: str, headers: list, body: bytes, respond: Callable,
+    ):
+        """wryview custom protocol → WSGI adapter (async: calls respond when done)."""
+        from urllib.parse import urlparse
+        parsed = urlparse(uri)
+
+        environ = {
+            "REQUEST_METHOD": method,
+            "PATH_INFO": parsed.path or "/",
+            "QUERY_STRING": parsed.query or "",
+            "SERVER_NAME": self._wsgi_scheme or "",
+            "SERVER_PORT": "80",
+            "SERVER_PROTOCOL": "HTTP/1.1",
+            "HTTP_HOST": self._wsgi_scheme or "",
+            "wsgi.version": (1, 0),
+            "wsgi.url_scheme": "http",
+            "wsgi.input": BytesIO(body),
+            "wsgi.errors": BytesIO(),
+            "wsgi.multithread": True,
+            "wsgi.multiprocess": False,
+            "wsgi.run_once": False,
+        }
+
+        for k, v in headers:
+            key = "HTTP_" + k.upper().replace("-", "_")
+            if key not in ("HTTP_CONTENT_TYPE", "HTTP_CONTENT_LENGTH"):
+                environ[key] = v
+        for k_lower, wsgi_key in (("content-type", "CONTENT_TYPE"), ("content-length", "CONTENT_LENGTH")):
+            for k, v in headers:
+                if k.lower() == k_lower:
+                    environ[wsgi_key] = v
+                    break
+
+        def _run():
+            status_info = {}
+
+            def start_response(status, response_headers, exc_info=None):
+                status_info["status"] = status
+                status_info["headers"] = response_headers
+
+            try:
+                result = self._wsgi_app(environ, start_response)
+            except Exception as e:
+                logger.error("WSGI error: %s", e, exc_info=True)
+                respond(500, [], b"Internal Server Error")
+                return
+
+            if "status" not in status_info:
+                respond(500, [], b"WSGI app did not call start_response")
+                return
+
+            status_code = int(status_info["status"].split(" ", 1)[0])
+            body_chunks = []
+            for chunk in result:
+                body_chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+            respond(status_code, status_info.get("headers", []), b"".join(body_chunks))
+
+        self._wsgi_pool.submit(_run)
+
+    # ── Public API ──────────────────────────────────────────────────────────
+
+    @property
+    def is_ready(self) -> bool:
+        """True once the underlying WebView has been created."""
+        return self._webview is not None
+
+    def load_url(self, url: str, headers: Optional[Union[dict, list]] = None):
+        """Navigate to a URL."""
+        if headers is None:
+            headers = []
+        if self.is_ready:
+            if headers:
+                self._webview.load_url_with_headers(url, headers)
+            else:
+                self._webview.load_url(url)
+        else:
+            self._url = url
+            self._pending_calls.append(('load_url', (url, headers), {}))
+
+    @_require_webview()
+    def load_url_with_headers(self, url: str, headers: Union[dict, list]):
+        """Navigate to URL with custom HTTP headers."""
+        self._webview.load_url_with_headers(url, headers)
+
+    @_require_webview()
+    def load_html(self, html: str):
+        """Load HTML content directly."""
+        self._webview.load_html(html)
+
+    def url(self) -> str | None:
+        if self.is_ready:
+            return self._webview.url()
+        else:
+            return self._url
+
+    @_require_webview()
+    def reload(self):
+        """Reload the current page."""
+        self._webview.reload()
+
+    @_require_webview()
+    def evaluate_js(self, script: str, callback: Optional[Callable[[str], None]] = None):
+        """Execute JavaScript. If *callback* is given, receives the result string."""
+        if callback:
+            self._webview.eval_js_with_callback(script, callback)
+        else:
+            self._webview.eval_js(script)
+
+    def eval_js(self, script: str, callback: Optional[Callable[[str], None]] = None):
+        """
+        Execute JavaScript. If *callback* is given, receives the result string.
+        (convenience alias for evaluate_js)
+        """
+        self.evaluate_js(script, callback)
+
+    @_require_webview()
+    def open_devtools(self):
+        """Open the browser DevTools window."""
+        self._webview.open_devtools()
+
+    @_require_webview()
+    def close_devtools(self):
+        """Close the browser DevTools window."""
+        self._webview.close_devtools()
+
+    @_require_webview()
+    def zoom(self, scale: float):
+        """Set zoom level (1.0 = 100%)."""
+        self._webview.zoom(scale)
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self._lazyload and not self._has_shown:
-            QTimer.singleShot(0, self._init_webview)
+        if self._lazyload and not self.is_ready:
+            QTimer.singleShot(0, self._start_webview)
 
-        self._has_shown = True
-
-        if self.is_ready:
-            self._webview.Visible = True
-
-    def hideEvent(self, event):
-        if self.is_ready:
-            self._webview.Visible = False
-        super().hideEvent(event)
-
-    def _init_webview(self):
-        """
-        Asynchronously initializes the WebView2 control.
-        """
-
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
         if self._webview:
-            logger.warning("WebView2 already initialized", stack_info=True)
-            return
+            r = self.rect()
+            self._webview.set_bounds(0, 0, r.width(), r.height())
 
-        dotnet.load_dotnet_env()
-        try:
-            self._webview = dotnet.WinForms.WebView2()
-            self._webview.CoreWebView2InitializationCompleted += self._on_webview_ready
-            self._webview.WebMessageReceived += self._on_script_notify
+    # ── Cookie ────────────────────────────────────────────────────────
 
-            if self._is_transparent:
-                self._webview.DefaultBackgroundColor = dotnet.System_.Drawing.Color.Transparent
-            elif self.background_color:
-                self._webview.DefaultBackgroundColor = dotnet.System_.Drawing.ColorTranslator.FromHtml(
-                    self.background_color
-                )
+    @_require_webview()
+    def set_cookie(self, name: str, value: str, domain: Optional[str] = None, path: Optional[str] = None):
+        """Set a cookie."""
+        self._webview.set_cookie(name, value, domain, path)
 
-            if self._no_local_storage:
-                user_data = None
-                logger.debug("WebView2 local storage is disabled")
-            else:
-                user_data = self._user_data_folder
-                if not self._user_data_folder:
-                    app_name = QCoreApplication.applicationName() or "DefaultQtApp"
-                    data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
-                    if not data_path:
-                        data_path = os.path.join(dotnet.System_.IO.Path.GetTempPath(), app_name)
-                    user_data = os.path.join(data_path, "WebView2_UserData")
-                logger.debug(f"WebView2 UserDataFolder: {user_data}")
+    @_require_webview(error_if_not_ready=True)
+    def cookies(self) -> list:
+        """Get all cookies."""
+        return self._webview.cookies()
 
-            if self._browser_executable_folder is not None:
-                # Fixed-version: use bundled WebView2 runtime
-                env_task = dotnet.Core.CoreWebView2Environment.CreateAsync(
-                    self._browser_executable_folder,
-                    user_data,
-                )
-                env_task.Wait()
-                if env_task.IsFaulted:
-                    raise env_task.Exception.InnerException or env_task.Exception
-                self._webview.EnsureCoreWebView2Async(env_task.Result)
-            else:
-                # Evergreen: use system WebView2 runtime via implicit initialization
-                props = dotnet.WinForms.CoreWebView2CreationProperties()
-                if user_data:
-                    props.UserDataFolder = user_data
-                self._webview.CreationProperties = props
-                self._webview.EnsureCoreWebView2Async(None)
+    @_require_webview(error_if_not_ready=True)
+    def cookies_for_url(self, url: str) -> list:
+        """Get cookies for a specific URL."""
+        return self._webview.cookies_for_url(url)
 
-        except Exception as e:
-            logger.error(f"Could not start WebView2 initialization: {repr(e)}", exc_info=True)
-            self.bridge.initialization_done.emit(False, str(e))
-            raise exceptions.WebviewInitException(e)
+    @_require_webview()
+    def delete_cookie(self, name: str, url: str):
+        """Delete a cookie."""
+        self._webview.delete_cookie(name, url)
 
-    def _on_webview_ready(self, sender: dotnet.WinForms.WebView2,
-                          args: dotnet.Core.CoreWebView2InitializationCompletedEventArgs):
-        """ .NET event handler, executed on a non-Qt thread. Emits a signal to return control to the Qt main thread. """
-        if not args.IsSuccess:
-            error_msg = str(args.InitializationException)
-            logger.error(f"WebView2 initialization failed: {error_msg}")
-            self.bridge.initialization_done.emit(False, error_msg)
-            return
+    # ── Misc ───────────────────────────────────────────────────────────
 
-        sender.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(self._get_jsbridge_script())
-        self.bridge.initialization_done.emit(True, "")
+    @_require_webview()
+    def set_background_color(self, r: int, g: int, b: int, a: int = 255):
+        """Set background color after creation."""
+        self._webview.set_background_color(r, g, b, a)
 
-    @Slot(bool, str)
-    def _on_initialization_completed(self, success: bool, error_message: str):
-        """ Qt slot, safely performs all UI-related initialization work in the main UI thread. """
-        if not success:
-            logger.error(f"WebView initialization error: {error_message}")
-            self.deleteLater()
-            return
+    @_require_webview()
+    def focus(self):
+        """Focus the webview."""
+        self._webview.focus()
 
-        # CoreWebView2 is now ready and can be configured
-        core_webview = self._webview.CoreWebView2
-        settings = self._webview.CoreWebView2.Settings
-        settings.IsScriptEnabled = True
-        settings.IsWebMessageEnabled = True
-        settings.AreDefaultScriptDialogsEnabled = True
+    @_require_webview()
+    def print(self):
+        """Print the current page."""
+        self._webview.print()
 
-        # --- Apply startup parameters ---
-        settings.AreDevToolsEnabled = self._debug_enabled
-        settings.AreBrowserAcceleratorKeysEnabled = self._debug_enabled
-        settings.AreDefaultContextMenusEnabled = self._context_menus_enabled
-        if self._user_agent:
-            settings.UserAgent = self._user_agent
-
-        if self._handle_new_window:
-            self._webview.CoreWebView2.NewWindowRequested += self._on_new_window_request
-
-        core_webview.ContainsFullScreenElementChanged += self._on_contains_fullscreen_element_changed
-
-        if self._init_settings_hook:
-            try:
-                self._init_settings_hook(core_webview)
-            except Exception as e:
-                logger.error(f"Error in init_settings_hook: {repr(e)}", exc_info=True)
-
-        self.is_ready = True
-        self._webview_hwnd = self._webview.Handle.ToInt32()
-
-        # Embed the window
-        self._webview_window = QWindow.fromWinId(self._webview_hwnd)
-        self._container = QWidget.createWindowContainer(self._webview_window, self)
-
-        self._layout.addWidget(self._container)
-
-        self._webview.Visible = self.isVisible()
-
-        self._webview.CoreWebView2.DOMContentLoaded += lambda sender, args: self.bridge.domContentLoaded.emit()
-
-        if self.wsgi_app:
-            logger.info(f"WSGI application detected. Intercepting requests for host: {self.wsgi_host_name}")
-            from .wsgi_server import WebView2WSGIServer
-            self._wsgi_server = WebView2WSGIServer(self.wsgi_app)
-
-            self._webview.CoreWebView2.AddWebResourceRequestedFilter(
-                f"http://{self.wsgi_host_name}/*",
-                dotnet.Core.CoreWebView2WebResourceContext.All
-            )
-            self._webview.CoreWebView2.AddWebResourceRequestedFilter(
-                f"https://{self.wsgi_host_name}/*",
-                dotnet.Core.CoreWebView2WebResourceContext.All
-            )
-
-            self._webview.CoreWebView2.WebResourceRequested += self._on_web_resource_requested
-
-        if self.url:
-            self.load_url(self.url)
-
-        for method_name, args, kwargs in self._pending_calls:
-            getattr(self, method_name)(*args, **kwargs)
-        self._pending_calls.clear()
-
-    def _on_contains_fullscreen_element_changed(self, sender, args):
-        is_full = sender.ContainsFullScreenElement
-        self.bridge.fullscreen_changed.emit(is_full)
-
-    def _on_web_resource_requested(self, sender, args):
-        from .wsgi_server import extract_request_data
-        try:
-            deferral = args.GetDeferral()
-            req_data = extract_request_data(args)
-            self._wsgi_executor.submit(self._run_wsgi_in_background, args, deferral, req_data)
-
-        except Exception as e:
-            logger.error(f"Error preparing WSGI request: {e}", exc_info=True)
-            pass
-
-    def _run_wsgi_in_background(self, args, deferral, req_data):
-        try:
-            status, headers, iterator = self._wsgi_server.process_wsgi_request(req_data)
-            self._wsgi_response_ready.emit(args, deferral, status, headers, iterator)
-        except Exception as e:
-            logger.error(f"Error in WSGI worker thread: {e}", exc_info=True)
-            self._wsgi_response_ready.emit(args, deferral, "500 Internal Server Error", [], None)
-
-    @Slot(bool)
-    def _default_on_fullscreen_change(self, is_fullscreen: bool):
-        window = self.window()
-        if not window:
-            return
-
-        if is_fullscreen:
-            self._saved_window_state = window.windowState()
-            window.showFullScreen()
-        else:
-            if self._saved_window_state is not None:
-                window.setWindowState(self._saved_window_state)
-            else:
-                window.showNormal()
-
-    @Slot(object, object, str, list, object)
-    def _finalize_wsgi_response(self, args, deferral, status, headers, iterator):
-        from .wsgi_server import PythonGeneratorStream
-        try:
-            if not status or status.startswith('500') or iterator is None:
-                reason_phrase = "Internal Server Error"
-                status_code = 500
-                content_stream = None
-            else:
-                parts = status.split(' ', 1)
-                status_code = int(parts[0])
-                reason_phrase = parts[1] if len(parts) > 1 else "OK"
-
-                content_stream = PythonGeneratorStream(iterator)
-
-            env = self._webview.CoreWebView2.Environment
-            response = env.CreateWebResourceResponse(
-                content_stream,
-                status_code,
-                reason_phrase,
-                ""
-            )
-
-            if headers:
-                for name, value in headers:
-                    try:
-                        response.Headers.AppendHeader(name, value)
-                    except Exception:
-                        pass
-
-            args.Response = response
-
-        except Exception as e:
-            logger.error(f"Error finalizing WSGI response: {e}", exc_info=True)
-        finally:
-            if deferral:
-                try:
-                    deferral.Complete()
-                except Exception as e:
-                    logger.warning(f"Failed to complete deferral (page might be closed): {e}")
-
-    def _on_new_window_request(self, sender, args):
-        uri_string = args.Uri
-
-        logger.debug(f"New window request: {uri_string}")
-
-        # Open in the default browser
-        webbrowser.open(uri_string)
-        args.Handled = True
-
-    def _on_script_notify(self, sender,
-                          args: dotnet.Core.CoreWebView2WebMessageReceivedEventArgs):
-        try:
-            self.bridge.web_message_received.emit(args.WebMessageAsJson)
-        except Exception as e:
-            logger.error(f"Error processing web message: {e}")
-
-    @Slot(str)
-    def _on_web_message_received(self, message: str):
-        try:
-            data = json.loads(message)
-            func_name, params, call_id = data['name'], data['params'], data['id']
-        except (json.JSONDecodeError, KeyError):
-            logger.warning(f"Received invalid message from JS bridge: {message}")
-            return
-
-        if func_name == '_qtwebviewCallback':
-            self.bridge.js_evaluation_result.emit(call_id, json.dumps(params))
-        elif func_name == 'call':
-            self._on_web_message_received(json.dumps({"name": params[0], "params": params[1:], "id": call_id}))
-        else:
-            logger.debug(f"Executing JS API function '{func_name}': {params}")
-            try:
-                res = self.js_api(func_name, *params)
-                if callable(res):  # async function
-                    thread_safe_callback = lambda result: self.bridge.async_result_ready.emit(
-                        {'result': result}, call_id
-                    )
-                    res(thread_safe_callback, *params)
-                else:  # sync function
-                    self._return_result_to_js({'result': res}, call_id)
-            except Exception as e:
-                logger.error(f"Error executing JS API function '{func_name}': {e}", exc_info=True)
-                self._return_result_to_js({'error': str(e)}, call_id)
-
-    def _get_jsbridge_script(self) -> str:
-        """ Returns the JS bridge script to be injected into the page. """
-        return """
-            (function() {
-                function getUuid() {
-                    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-                        var r = (Math.random() * 16) | 0,
-                            v = c == 'x' ? r : (r & 0x3) | 0x8;
-                        return v.toString(16);
-                    });
-                }
-
-                window.qtwebview2 = {
-                    api: new Proxy({}, {
-                        get(target, prop, receiver) {
-                            return (...args) => {
-                                const id = getUuid();
-                                const promise = new Promise((resolve, reject) => {
-                                    const handler = (e) => {
-                                        if (e.detail.error) {
-                                            reject(new Error(e.detail.error));
-                                        } else {
-                                            resolve(e.detail.result);
-                                        }
-                                    };
-                                    window.addEventListener('qtwebview2-response-' + id, handler, { once: true });
-                                });
-                                window.chrome.webview.postMessage({
-                                    name: prop,
-                                    params: args,
-                                    id: id
-                                });
-                                return promise;
-                            }
-                        }
-                    })
-                };
-            })();
-        """
-
-    @Slot(dict, str)
-    def _return_result_to_js(self, result_data: dict, call_id: str):
-        """ Returns the result of a Python API call to JS. This is now a thread-safe slot. """
-        try:
-            result_data_json = json.dumps(result_data)
-        except Exception as e:
-            logger.error(f"Failed to convert result to JSON: {repr(e)}", exc_info=True)
-            result_data_json = json.dumps({'error': repr(e)})
-
-        script = (
-            f"window.dispatchEvent("
-            f"new CustomEvent('qtwebview2-response-{call_id}', {{ detail: {result_data_json} }})"
-            f");"
-        )
-        logger.debug(f"return_result_to_js: {script}")
-
-        self.bridge.execute_js_from_thread.emit(script)
+    @_require_webview()
+    def clear_all_browsing_data(self):
+        """Clear all browsing data (cache, cookies, storage)."""
+        self._webview.clear_all_browsing_data()
 
     def closeEvent(self, event):
-        if self._webview:
-            self._webview.Dispose()
-        self._wsgi_executor.shutdown(wait=False)
         super().closeEvent(event)
 
-    # --- Public API Methods ---
-    def reload(self):
-        """Reloads the current page."""
-        if self.is_ready:
-            self._webview.Reload()
-        else:
-            self._pending_calls.append(('reload', (), {}))
 
-    def load_url(self, url: str):
-        """Loads a URL."""
-        if self.is_ready:
-            self._webview.Source = dotnet.System_.Uri(url)
-        else:
-            self._pending_calls.append(('load_url', (url,), {}))
-
-    def load_html(self, html: str, base_uri: Optional[str] = None):
-        """Loads HTML."""
-        if self.is_ready:
-            self._webview.NavigateToString(html)
-        else:
-            self._pending_calls.append(('load_html', (html,), {'base_uri': base_uri}))
-
-    def evaluate_js(self, script: str, callback: Optional[Callable[[dict], None]] = None):
-        """
-        Executes JavaScript. If a callback is provided, it will be called with a dictionary
-        containing the success/failure status and the result/error.
-        This method is thread-safe.
-        """
-        if not self.is_ready:
-            self._pending_calls.append(('evaluate_js', (script,), {'callback': callback}))
-            return
-
-        call_id = uuid.uuid4().hex
-        if callback:
-            self._js_callbacks[call_id] = callback
-
-        wrapped_script = f"""
-            (async function() {{
-                try {{
-                    const result = await (async () => {{ {script} }})();
-                    window.chrome.webview.postMessage({{
-                        name: '_qtwebviewCallback',
-                        params: {{'success': true, 'result': result === undefined ? null : result}},
-                        id: '{call_id}'
-                    }});
-                }} catch (e) {{
-                    window.chrome.webview.postMessage({{
-                        name: '_qtwebviewCallback',
-                        params: {{'success': false, 'error': e.toString()}},
-                        id: '{call_id}'
-                    }});
-                }}
-            }})();
-        """
-        self.bridge.execute_js_from_thread.emit(wrapped_script)
-
-    @Slot(str)
-    def _execute_script_in_main_thread(self, script: str):
-        if not self.is_ready:
-            self._pending_calls.append(('_execute_script_in_main_thread', (script,), {}))
-            return
-        self._webview.ExecuteScriptAsync(script)
-
-    @Slot(str, str)
-    def _on_js_evaluation_result(self, call_id: str, result_json: str):
-        """ Handles the callback for evaluate_js in the Qt main thread. """
-        callback = self._js_callbacks.pop(call_id, None)
-        if callback:
-            try:
-                result_dict = json.loads(result_json)
-                callback(result_dict)
-            except Exception as e:
-                logger.error(f"Error processing JS callback: {e}", exc_info=True)
-
-    def hasFocus(self):
-        # Check if _webview exists and has not been disposed
-        if self._webview and not self._webview.IsDisposed:
-            return self._webview.ContainsFocus
-        return super().hasFocus()
+@deprecated("Use QtWebViewWidget instead")
+class QtWebView2Widget(QtWebViewWidget):
+    ...
