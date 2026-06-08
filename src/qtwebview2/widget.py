@@ -21,6 +21,7 @@ from typing import Callable, Any, Optional, Union
 from typing_extensions import deprecated
 from qtpy.QtCore import Qt, QObject, Signal, QTimer, QStandardPaths
 from qtpy.QtWidgets import QWidget
+from qtpy.QtGui import QPainter, QColor, QWindow
 from wryview import WebView
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,31 @@ _JS_BRIDGE = """
 """
 
 
+class _AnchorWindow(QWidget):
+    """Top-level transparent widget — the WebView's parent window.
+
+    No Qt parent → independent HWND that survives hide / show cycles.
+    ``WA_TranslucentBackground`` eliminates the black flash during resize.
+    The nearly-transparent ``paintEvent`` fill (alpha=1) prevents mouse
+    events from passing through to windows behind.
+    """
+
+    def __init__(self):
+        super().__init__(None)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 1))
+        p.end()
+
+
 def _require_webview(error_if_not_ready: bool = False):
     """Decorator: if webview not ready, queue call or raise error.
 
@@ -184,6 +210,7 @@ class QtWebViewWidget(QWidget):
             javascript_enabled: bool = True,
             hotkeys_zoom: bool = True,
             drag_drop_handler: Optional[Callable[[str, list, tuple], bool]] = None,
+            native_child: bool = False,
             parent: Optional[QWidget] = None,
     ):
         """
@@ -214,14 +241,13 @@ class QtWebViewWidget(QWidget):
         :param javascript_enabled: Enable JavaScript. Default True.
         :param hotkeys_zoom: Enable Ctrl+/- zoom. Default True.
         :param drag_drop_handler: Callable(evt_type, paths, position) → bool.
+        :param native_child: If True, embed the WebView directly as a native child
+            window (``build_as_child``) instead of using an independent anchor
+            window.  Simpler, but the WebView dies with the parent HWND on Windows
+            — avoid for system-tray apps.  Default False.
         :param parent: Parent Qt widget.
         """
         super().__init__(parent)
-
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        self.setAutoFillBackground(False)
 
         # ── Config ──
         self._url = url
@@ -242,6 +268,7 @@ class QtWebViewWidget(QWidget):
         self._javascript_enabled = javascript_enabled
         self._hotkeys_zoom = hotkeys_zoom
         self._drag_drop_handler = drag_drop_handler
+        self._native_child = native_child
         self.navigation_handler = navigation_handler
         self.newWindow_handler = new_window_handler
 
@@ -258,6 +285,7 @@ class QtWebViewWidget(QWidget):
 
         # ── Create webview (deferred to thread for fast startup) ──
         self._webview: Optional[WebView] = None
+        self._anchor: Optional[QWidget] = None
         self._pending_calls: list[tuple[str, tuple, dict]] = []
 
         if not self._lazyload:
@@ -266,9 +294,41 @@ class QtWebViewWidget(QWidget):
     # ── WebView creation ────────────────────────────────────────────────────
 
     def _start_webview(self):
-        """Launch WebView2 init in background thread, finish on main thread."""
-        hwnd = int(self.winId())
+        if self._native_child:
+            self._start_webview_native()
+        else:
+            self._start_webview_anchor()
 
+    def _start_webview_anchor(self):
+        """Create independent transparent QWidget, embed via fromWinId + container."""
+        self._anchor = _AnchorWindow()
+        hwnd = int(self._anchor.winId())
+        view = QWindow.fromWinId(hwnd)
+        self._container = QWidget.createWindowContainer(view, self)
+        layout = self.layout()
+        if layout is None:
+            from qtpy.QtWidgets import QVBoxLayout as _Layout
+            layout = _Layout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+
+        layout.addWidget(self._container)
+
+        if self.isVisible():
+            self._anchor.show()
+
+        self._webview = self._make_webview(hwnd)
+        self._flush_pending()
+
+    def _start_webview_native(self):
+        """Embed WebView directly as a native child of this widget."""
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
+        hwnd = int(self.winId())
+        self._webview = self._make_webview(hwnd)
+        self._flush_pending()
+
+    def _make_webview(self, hwnd: int) -> WebView:
+        """Build the kwargs dict and create a WebView."""
         kwargs: dict = {
             "initialization_script": _JS_BRIDGE,
             "devtools": self._debug,
@@ -351,12 +411,9 @@ class QtWebViewWidget(QWidget):
         if self._headers:
             kwargs["headers"] = self._headers
 
-        self._webview = WebView(hwnd, **kwargs)
+        return WebView(hwnd, as_child=False, **kwargs)
 
-        r = self.rect()
-        self._webview.set_bounds(0, 0, r.width(), r.height())
-
-        # Flush pending calls
+    def _flush_pending(self):
         for name, args, kwargs in self._pending_calls:
             getattr(self, name)(*args, **kwargs)
         self._pending_calls.clear()
@@ -546,12 +603,24 @@ class QtWebViewWidget(QWidget):
         super().showEvent(event)
         if self._lazyload and not self.is_ready:
             QTimer.singleShot(0, self._start_webview)
+        elif self._anchor:
+            self._anchor.show()
+        elif self._webview:
+            self._webview.set_visible(True)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self._webview:
-            r = self.rect()
-            self._webview.set_bounds(0, 0, r.width(), r.height())
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self._anchor:
+            self._anchor.hide()
+        elif self._webview:
+            self._webview.set_visible(False)
+
+    def closeEvent(self, event):
+        self._webview = None
+        if self._anchor:
+            self._anchor.deleteLater()
+            self._anchor = None
+        super().closeEvent(event)
 
     # ── Cookie ────────────────────────────────────────────────────────
 
@@ -596,9 +665,6 @@ class QtWebViewWidget(QWidget):
     def clear_all_browsing_data(self):
         """Clear all browsing data (cache, cookies, storage)."""
         self._webview.clear_all_browsing_data()
-
-    def closeEvent(self, event):
-        super().closeEvent(event)
 
 
 @deprecated("Use QtWebViewWidget instead")

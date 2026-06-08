@@ -296,6 +296,23 @@ if __name__ == "__main__":
     sys.exit(app.exec())
 ```
 
+## ⚠️ System Tray / Hide & Show
+
+By default, `QtWebViewWidget` uses an independent anchor window
+(`native_child=False`) — the WebView **survives** parent hide/show cycles on
+Windows. Tray apps work out of the box.
+
+If you opt into the old direct-child mode with `native_child=True`, the
+WebView is a native child of the Qt widget and will be destroyed when the
+parent HWND is torn down:
+
+```python
+# Only needed for native_child=True:
+def closeEvent(self, event):
+    event.ignore()   # don't destroy the native window
+    self.hide()      # just hide — WebView stays alive
+```
+
 ## 📊 Quick Comparison
 
 |                    | QtWebView (v0.6.0+)          | pywebview       | QWebEngineView  |

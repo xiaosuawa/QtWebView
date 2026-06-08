@@ -292,6 +292,21 @@ if __name__ == "__main__":
     sys.exit(app.exec())
 ```
 
+## ⚠️ 系统托盘 / 隐藏与恢复
+
+默认模式下 `QtWebViewWidget` 使用独立的锚点窗口（`native_child=False`）
+—— WebView **不受**父窗口 hide/show 影响，托盘应用可直接使用。
+
+如果通过 `native_child=True` 切回旧的直接子窗口模式，WebView 会随父窗口
+HWND 一起销毁：
+
+```python
+# 仅 native_child=True 时需要：
+def closeEvent(self, event):
+    event.ignore()   # 不销毁原生窗口
+    self.hide()      # 仅隐藏——WebView 保持存活
+```
+
 ## 🔄 从 v0.5.x 迁移
 
 ```python
