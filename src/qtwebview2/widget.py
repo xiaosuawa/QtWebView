@@ -4,8 +4,15 @@
 """
 QtWebView — Qt webview widget powered by wryview (wry).
 
-Cross-platform (Windows/macOS/Linux). Embeds a wry WebView as a native
-child window inside any Qt widget.
+Embeds a wry WebView as a native child window inside any Qt widget.
+
+**Supported platforms**: Windows, macOS.
+
+**Linux** is **not** currently supported.  The underlying wryview library
+compiles and runs on Linux (WebKitGTK), but the integration layer between
+Qt's xcb backend and wry's Xlib/GDK code has unresolved issues — PRs
+welcome from Linux contributors!  In the meantime, Linux desktop users
+can run the app under Wine.
 """
 
 from __future__ import annotations
@@ -294,6 +301,14 @@ class QtWebViewWidget(QWidget):
     # ── WebView creation ────────────────────────────────────────────────────
 
     def _start_webview(self):
+        import sys as _sys
+        if _sys.platform == "linux":
+            raise RuntimeError(
+                "QtWebView is not yet supported on Linux — PRs welcome! "
+                "The underlying wryview library compiles on Linux, but the "
+                "Qt xcb ↔ wry Xlib bridge has unresolved issues. "
+                "Linux users can run the app under Wine instead."
+            )
         if self._native_child:
             self._start_webview_native()
         else:

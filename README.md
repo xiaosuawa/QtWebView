@@ -14,7 +14,7 @@
 
 v0.6.0 replaces the old **pythonnet + .NET CLR + WebView2 WinForms** backend with **[wryview](https://github.com/xiaosuawa/wryview)**, a Rust-powered binding for [wry](https://github.com/tauri-apps/wry) (the WebView engine used by [Tauri](https://tauri.app)).
 
-This brings **cross-platform support** (Windows, macOS, Linux), **faster startup** (no .NET CLR), and access to the **wry API** (cookies, devtools, custom protocols, etc.).
+This brings **cross-platform support** (Windows, macOS), **faster startup** (no .NET CLR), and access to the **wry API** (cookies, devtools, custom protocols, etc.). Linux is not yet supported (PRs welcome!).
 
 See [Migration Guide](#-migration-from-v05x) below if upgrading from v0.5.x.
 
@@ -24,7 +24,7 @@ QtWebView embeds a wry WebView as a native child window inside any Qt (PySide/Py
 
 ## ✨ Features
 
-- **Cross-Platform** — Windows (WebView2), macOS (WKWebView), Linux (WebKitGTK). Same API everywhere.
+- **Cross-Platform** — Windows (WebView2), macOS (WKWebView). Same API everywhere. Linux not yet supported.
 - **Qt-Native Embedding** — True QWidget via native child window, not a pseudo-overlay.
 - **JS Bridge** — Two-way Python ↔ JavaScript communication with async/await support.
 - **WSGI Compatible** — Run Flask, Bottle, Django inside the webview via custom protocol (no TCP server).
@@ -318,7 +318,7 @@ def closeEvent(self, event):
 |                    | QtWebView (v0.6.0+)          | pywebview       | QWebEngineView  |
 |--------------------|------------------------------|-----------------|-----------------|
 | **Qt Integration** | ✅ Native QWidget             | ⚠️ Pseudo-embed | ✅ Native        |
-| **Cross-Platform** | ✅ Win/Mac/Linux              | ✅               | ✅               |
+| **Cross-Platform** | ✅ Win/Mac                     | ✅               | ✅               |
 | **Package Size**   | ✅ Small (wryview .pyd)       | Small           | ❌ Large (~80MB) |
 | **WSGI**           | ✅ Custom protocol (portless) | Local HTTP      | QWebChannel     |
 | **JS Bridge**      | ✅ Promise/async              | ✅               | ⚠️ Complex      |

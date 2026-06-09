@@ -14,7 +14,7 @@
 
 v0.6.0 将旧的 **pythonnet + .NET CLR + WebView2 WinForms** 后端替换为 **[wryview](https://github.com/xiaosuawa/wryview)**（[wry](https://github.com/tauri-apps/wry) 的 Rust 绑定，[Tauri](https://tauri.app) 的 WebView 引擎）。
 
-带来 **跨平台支持**（Windows、macOS、Linux）、**更快的启动速度**（去掉了 .NET CLR）、以及 **wry API**（Cookie、DevTools、自定义协议等）。
+带来 **跨平台支持**（Windows、macOS）、**更快的启动速度**（去掉了 .NET CLR）、以及 **wry API**（Cookie、DevTools、自定义协议等）。Linux 暂不支持（欢迎贡献 PR！）。
 
 从 v0.5.x 升级请参考[迁移指南](#-从-v05x-迁移)。
 
@@ -24,7 +24,7 @@ QtWebView 将 wry WebView 作为原生子窗口嵌入任何 Qt（PySide/PyQt）w
 
 ## ✨ 特性
 
-- **跨平台** — Windows（WebView2）、macOS（WKWebView）、Linux（WebKitGTK），统一 API。
+- **跨平台** — Windows（WebView2）、macOS（WKWebView），统一 API。Linux 暂不支持。
 - **Qt 原生嵌入** — 真正的 QWidget 子窗口，非伪覆盖层。
 - **JS Bridge** — Python ↔ JavaScript 双向通信，支持 async/await。
 - **WSGI 兼容** — 在 WebView 中运行 Flask、Bottle、Django，通过自定义协议（无需 TCP 端口）。
