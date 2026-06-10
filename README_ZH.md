@@ -313,6 +313,23 @@ def closeEvent(self, event):
     self.hide()      # 仅隐藏——WebView 保持存活
 ```
 
+## 📊 快速对比
+
+|               | QtWebView (v0.6.0+) | pywebview | QWebEngineView |
+|---------------|---------------------|-----------|----------------|
+| **Qt 集成**     | ✅ 原生 QWidget        | ⚠️ 需自行嵌入  | ✅ 原生           |
+| **跨平台**       | ✅ Win/Mac           | ✅         | ✅              |
+| **包体积**       | ✅ 小巧（wryview <1MB）  | 小巧        | ❌ 庞大（>160MB）   |
+| **WSGI**      | ✅ 自定义协议（无需端口）       | 本地 HTTP   | QWebChannel    |
+| **JS Bridge** | ✅ Promise/async     | ✅         | ⚠️ 复杂          |
+| **启动速度**      | ~1-2s               | ~1-3s     | ~2-3s          |
+| **半透明叠加**     | ❌ 系统限制              | ❌ 系统限制    | ✅ 原生混合         |
+
+> **空域问题（Airspace）**：Windows 上 HWND 子窗口与 Qt 原生渲染分属不同渲染管线。
+> 不透明 Qt 组件放在 WebView 之上可以正常显示，但**半透明**组件只会与下方 Qt 窗口混合，
+> **不会**与 WebView 内容混合。这是 Win32 窗口系统的限制，
+> QWebEngineView 因使用 Qt 原生渲染管线无此问题。
+
 ## 🔄 从 v0.5.x 迁移
 
 ```python

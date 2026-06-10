@@ -549,7 +549,9 @@ class QtWebViewWidget(QWidget):
             kwargs["width"] = self.width()
             kwargs["height"] = self.height()
 
-        return WebView(hwnd, **kwargs)
+        QTimer.singleShot(0, self._resize_webview)
+
+        return WebView(hwnd, as_child=self._native_child, **kwargs)
 
     def _flush_pending(self):
         for name, args, kwargs in self._pending_calls:

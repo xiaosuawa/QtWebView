@@ -318,14 +318,21 @@ def closeEvent(self, event):
 
 ## 📊 Quick Comparison
 
-|                    | QtWebView (v0.6.0+)          | pywebview       | QWebEngineView  |
-|--------------------|------------------------------|-----------------|-----------------|
-| **Qt Integration** | ✅ Native QWidget             | ⚠️ Pseudo-embed | ✅ Native        |
-| **Cross-Platform** | ✅ Win/Mac                     | ✅               | ✅               |
-| **Package Size**   | ✅ Small (wryview .pyd)       | Small           | ❌ Large (~80MB) |
-| **WSGI**           | ✅ Custom protocol (portless) | Local HTTP      | QWebChannel     |
-| **JS Bridge**      | ✅ Promise/async              | ✅               | ⚠️ Complex      |
-| **Startup**        | ~1.5s                        | ~1-3s           | ~2-3s           |
+|                      | QtWebView (v0.6.0+)          | pywebview      | QWebEngineView   |
+|----------------------|------------------------------|----------------|------------------|
+| **Qt Integration**   | ✅ Native QWidget             | ⚠️ Self-embed  | ✅ Native         |
+| **Cross-Platform**   | ✅ Win/Mac                    | ✅              | ✅                |
+| **Package Size**     | ✅ Small (wryview <1MB)       | Small          | ❌ Large (>160MB) |
+| **WSGI**             | ✅ Custom protocol (portless) | Local HTTP     | QWebChannel      |
+| **JS Bridge**        | ✅ Promise/async              | ✅              | ⚠️ Complex       |
+| **Startup**          | ~1-2s                        | ~1-3s          | ~2-3s            |
+| **Semi-transparent** | ❌ System limit               | ❌ System limit | ✅ Native blend   |
+
+> **Airspace Issue**: On Windows, HWND child windows and Qt native rendering use separate
+> rendering pipelines. Opaque Qt widgets placed on top of the WebView display correctly,
+> but **semi-transparent** widgets only blend with the Qt window underneath — they will
+> **not** blend with WebView content. This is a Win32 windowing system limitation;
+> QWebEngineView avoids it by using Qt's native rendering pipeline.
 
 ## 🔄 Migration from v0.5.x
 
