@@ -19,16 +19,19 @@ from __future__ import annotations
 
 __lazy_modules__ = ["wryview"]
 
+import concurrent.futures
 import functools
 import json
 import logging
+import sys
 import typing
+import webbrowser
 from io import BytesIO
 from typing import Callable, Any, Optional, Union
 from typing_extensions import deprecated
 from qtpy.QtCore import Qt, QObject, Signal, QTimer, QStandardPaths
 from qtpy.QtWidgets import QWidget
-from qtpy.QtGui import QPainter, QColor, QWindow
+from qtpy.QtGui import QWindow
 from wryview import WebView
 
 logger = logging.getLogger(__name__)
@@ -141,30 +144,67 @@ _JS_BRIDGE = """
 })();
 """
 
+_FULLSCREEN_JS = """
+(function() {
+    if (Element.prototype.hasOwnProperty('_qtwebview_fs')) return;
+    Object.defineProperty(Element.prototype, '_qtwebview_fs', {value: true});
+
+    var _origReqFS = Element.prototype.requestFullscreen;
+    var _origExitFS = Document.prototype.exitFullscreen;
+
+    Element.prototype.requestFullscreen = function(opts) {
+        window.ipc.postMessage(JSON.stringify({
+            type: "qtwebview", name: "__fullscreen__", params: [true], id: "fs"
+        }));
+        return _origReqFS ? _origReqFS.call(this, opts) : Promise.resolve();
+    };
+
+    Document.prototype.exitFullscreen = function() {
+        window.ipc.postMessage(JSON.stringify({
+            type: "qtwebview", name: "__fullscreen__", params: [false], id: "fs"
+        }));
+        return _origExitFS ? _origExitFS.call(this) : Promise.resolve();
+    };
+})();
+"""
+
 
 class _AnchorWindow(QWidget):
-    """Top-level transparent widget — the WebView's parent window.
+    """
+    Top-level transparent widget — the WebView's parent window.
 
     No Qt parent → independent HWND that survives hide / show cycles.
-    ``WA_TranslucentBackground`` eliminates the black flash during resize.
-    The nearly-transparent ``paintEvent`` fill (alpha=1) prevents mouse
-    events from passing through to windows behind.
+    macOS: ``WA_TranslucentBackground`` prevents the resize flash.
+    Windows: no ``WA_TranslucentBackground`` to avoid the layered-window hit-test bug with ``createWindowContainer``.
     """
 
     def __init__(self):
         super().__init__(None)
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if sys.platform != "win32":
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowDoesNotAcceptFocus
         )
 
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.fillRect(self.rect(), QColor(0, 0, 0, 1))
-        p.end()
+    # ── Abandoned approach — kept for reference ────────────────────────
+    # We originally used ``WA_TranslucentBackground`` on all platforms with
+    # a nearly-transparent paintEvent (alpha=1) to eliminate the resize flash.
+    #
+    # On Windows, after the anchor is embedded via ``createWindowContainer``,
+    # paintEvent stops firing entirely — manual repaint also has no effect.
+    # Areas expanded beyond the initial size never receive the alpha=1 fill,
+    # so the DWM has nothing to hit-test against and clicks pass through to
+    # the desktop.  macOS does not have this problem (no per-pixel hit-test).
+    #
+    # The fix: drop ``WA_TranslucentBackground`` on Windows.
+    #
+    # def paintEvent(self, event):
+    #     p = QPainter(self)
+    #     p.fillRect(self.rect(), QColor(0, 0, 0, 1))
+    #     p.end()
+    # ────────────────────────────────────────────────────────────────────
 
 
 def _require_webview(error_if_not_ready: bool = False):
@@ -190,6 +230,15 @@ def _require_webview(error_if_not_ready: bool = False):
     return decorator
 
 
+def default_new_window_handler(url: str):
+    # Open in the default browser
+    webbrowser.open(url)
+    return 'deny'
+
+
+_NOT_GIVEN: Any = object()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # The Widget
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -205,18 +254,19 @@ class QtWebViewWidget(QWidget):
             transparent: bool = False,
             background_color: Optional[str] = None,
             navigation_handler: Optional[Callable[[str], bool]] = None,
-            new_window_handler: Optional[Callable[[str], str]] = None,
+            new_window_handler: Optional[Callable[[str], str]] = default_new_window_handler,
             lazyload: bool = True,
             js_apis: Union[dict[str, Callable[..., Any]], QtWebViewJsBridge, None] = None,
             user_data_folder: Optional[str] = None,
             incognito: bool = False,
             wsgi_app: Optional[Callable[..., Any]] = None,
             wsgi_scheme: Optional[str] = None,
-            wsgi_executor: Optional[int] = None,
+            wsgi_executor: Union[concurrent.futures.Executor, int] = 8,
             autoplay: bool = False,
             javascript_enabled: bool = True,
             hotkeys_zoom: bool = True,
             drag_drop_handler: Optional[Callable[[str, list, tuple], bool]] = None,
+            fullscreen_handler: Optional[Callable[[bool], None]] = _NOT_GIVEN,
             native_child: bool = False,
             parent: Optional[QWidget] = None,
     ):
@@ -241,7 +291,10 @@ class QtWebViewWidget(QWidget):
         :param wsgi_app: A WSGI-compatible app (Flask, Bottle, Django, etc.). Requests
             are served via custom protocol (default scheme ``qtwebview://``) or localhost
             TCP if ``wsgi_scheme="localhost"``.
-        :param wsgi_executor: Number of threads for WSGI request pool. Default 8.
+        :param wsgi_executor: If provided a thread pool executor,
+            the WSGI App will be executed in the provided executor.
+            If provided a number, the WSGI App will be executed in a thread pool executor
+            with the specified number of threads. defaults to 8
         :param wsgi_scheme: Custom protocol scheme for WSGI. Default ``"qtwebview"``.
             Use ``"localhost"`` to switch to a TCP server on 127.0.0.1 with auto port.
         :param autoplay: Allow autoplay of media. Default False.
@@ -249,9 +302,15 @@ class QtWebViewWidget(QWidget):
         :param hotkeys_zoom: Enable Ctrl+/- zoom. Default True.
         :param drag_drop_handler: Callable(evt_type, paths, position) → bool.
         :param native_child: If True, embed the WebView directly as a native child
-            window (``build_as_child``) instead of using an independent anchor
-            window.  Simpler, but the WebView dies with the parent HWND on Windows
-            — avoid for system-tray apps.  Default False.
+            window instead of using an independent anchor window. Simpler,
+            but the WebView dies with the parent HWND — avoid for system-tray apps.
+            Default False.
+        :param fullscreen_handler: Callable(enter: bool) → None. Called when the page
+            requests fullscreen (enter=True) or exit fullscreen (enter=False) via the
+            JavaScript Fullscreen API.  The default implementation (anchor mode only)
+            reparents the webview container into a dedicated fullscreen ``QWidget``.
+            In native-child mode the default is a no-op.  Pass ``None`` to disable
+            fullscreen interception entirely.
         :param parent: Parent Qt widget.
         """
         super().__init__(parent)
@@ -264,7 +323,14 @@ class QtWebViewWidget(QWidget):
         self._bg_color = background_color
         self._wsgi_app = wsgi_app
         self._wsgi_scheme = wsgi_scheme
-        self._wsgi_executor = wsgi_executor
+
+        if isinstance(wsgi_executor, int):
+            self._wsgi_executor = concurrent.futures.ThreadPoolExecutor(max_workers=wsgi_executor)
+        elif isinstance(wsgi_executor, concurrent.futures.Executor):
+            self._wsgi_executor = wsgi_executor
+        else:
+            raise TypeError("The wsgi_executor parameter must be a thread pool executor or an integer")
+
         self._wsgi_port = None
         self._html = html
         self._headers = headers
@@ -276,6 +342,11 @@ class QtWebViewWidget(QWidget):
         self._hotkeys_zoom = hotkeys_zoom
         self._drag_drop_handler = drag_drop_handler
         self._native_child = native_child
+        self._fullscreen_handler = (
+            self._default_fullscreen_handler
+            if fullscreen_handler is _NOT_GIVEN
+            else fullscreen_handler
+        )
         self.navigation_handler = navigation_handler
         self.newWindow_handler = new_window_handler
 
@@ -292,7 +363,7 @@ class QtWebViewWidget(QWidget):
 
         # ── Create webview (deferred to thread for fast startup) ──
         self._webview: Optional[WebView] = None
-        self._anchor: Optional[QWidget] = None
+        self._anchor: Optional[_AnchorWindow] = None
         self._pending_calls: list[tuple[str, tuple, dict]] = []
 
         if not self._lazyload:
@@ -301,8 +372,7 @@ class QtWebViewWidget(QWidget):
     # ── WebView creation ────────────────────────────────────────────────────
 
     def _start_webview(self):
-        import sys as _sys
-        if _sys.platform == "linux":
+        if sys.platform == "linux":
             raise RuntimeError(
                 "QtWebView is not yet supported on Linux — PRs welcome! "
                 "The underlying wryview library compiles on Linux, but the "
@@ -342,10 +412,60 @@ class QtWebViewWidget(QWidget):
         self._webview = self._make_webview(hwnd)
         self._flush_pending()
 
+    def _resize_webview(self):
+        """Resize the webview to fill its container (anchor or widget)."""
+        if not self.is_ready:
+            return
+        if self._native_child:
+            w = self.width()
+            h = self.height()
+        else:
+            w = self._container.width()
+            h = self._container.height()
+        if w > 0 and h > 0:
+            self._webview.set_bounds(0, 0, w, h)
+
+    # ── Fullscreen ────────────────────────────────────────────────────────
+
+    def _default_fullscreen_handler(self, enter: bool):
+        """Default fullscreen: reparent container into a dedicated fullscreen window."""
+        if self._native_child or self._anchor is None or self._container is None:
+            return
+
+        if enter:
+            layout = self.layout()
+            if layout and self._container:
+                layout.removeWidget(self._container)
+
+            from qtpy.QtWidgets import QVBoxLayout as _FSLayout
+
+            self._fs_window = QWidget(None, Qt.WindowType.Window)
+            self._fs_window.setAutoFillBackground(True)
+            fs_layout = _FSLayout(self._fs_window)
+            fs_layout.setContentsMargins(0, 0, 0, 0)
+            fs_layout.addWidget(self._container)
+            self._fs_window.showFullScreen()
+            self._resize_webview()
+        else:
+            self._fs_window.hide()
+
+            layout = self.layout()
+            if layout and self._container:
+                layout.addWidget(self._container)
+                self._container.show()
+
+            self._fs_window.close()
+            self._fs_window = None
+            self._resize_webview()
+
     def _make_webview(self, hwnd: int) -> WebView:
         """Build the kwargs dict and create a WebView."""
+        init_script = _JS_BRIDGE
+        if self._fullscreen_handler is not None:
+            init_script += _FULLSCREEN_JS
+
         kwargs: dict = {
-            "initialization_script": _JS_BRIDGE,
+            "initialization_script": init_script,
             "devtools": self._debug,
             "transparent": self._transparent,
             "incognito": self._incognito,
@@ -376,18 +496,16 @@ class QtWebViewWidget(QWidget):
             if len(c) == 6:
                 kwargs["background_color"] = (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16), 255)
 
-        # Thread pool for WSGI — callbacks are on main thread
-        from concurrent.futures import ThreadPoolExecutor
-        self._wsgi_pool = ThreadPoolExecutor(max_workers=self._wsgi_executor or 8)
-
         if self._wsgi_app:
             if self._wsgi_scheme == "localhost":
+                _wsgi_executor = self._wsgi_executor
                 from wsgiref.simple_server import make_server, WSGIServer
                 from socketserver import ThreadingMixIn
                 import threading
 
                 class ThreadedServer(ThreadingMixIn, WSGIServer):
-                    daemon_threads = True
+                    def process_request(self, request, client_address):
+                        _wsgi_executor.submit(self.process_request_thread, request, client_address)
 
                 server = make_server("127.0.0.1", 0, self._wsgi_app, server_class=ThreadedServer)
                 self._wsgi_port = server.server_port
@@ -426,7 +544,12 @@ class QtWebViewWidget(QWidget):
         if self._headers:
             kwargs["headers"] = self._headers
 
-        return WebView(hwnd, as_child=False, **kwargs)
+        # Initial size — fill the container (or widget for native mode)
+        if self.width() > 0 and self.height() > 0:
+            kwargs["width"] = self.width()
+            kwargs["height"] = self.height()
+
+        return WebView(hwnd, **kwargs)
 
     def _flush_pending(self):
         for name, args, kwargs in self._pending_calls:
@@ -448,6 +571,13 @@ class QtWebViewWidget(QWidget):
             func_name = data.get("name", "")
             params = data.get("params", [])
             call_id = data.get("id", "")
+
+            # Fullscreen API interception
+            if func_name == "__fullscreen__":
+                if self._fullscreen_handler:
+                    enter = bool(params[0]) if params else True
+                    self._fullscreen_handler(enter)
+                return
 
             if func_name == "call":
                 func_name = params[0] if params else ""
@@ -541,7 +671,7 @@ class QtWebViewWidget(QWidget):
                 body_chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
             respond(status_code, status_info.get("headers", []), b"".join(body_chunks))
 
-        self._wsgi_pool.submit(_run)
+        self._wsgi_executor.submit(_run)
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -629,6 +759,10 @@ class QtWebViewWidget(QWidget):
             self._anchor.hide()
         elif self._webview:
             self._webview.set_visible(False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_webview()
 
     def closeEvent(self, event):
         self._webview = None

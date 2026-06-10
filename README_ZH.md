@@ -63,7 +63,8 @@ win.show()
 sys.exit(app.exec())
 ```
 
-### JS Bridge — Python ↔ JavaScript 双向通信
+<details>
+<summary>### JS Bridge — Python ↔ JavaScript 双向通信</summary>
 
 通过 `DictJsBridge` 将 Python 函数暴露给 JavaScript。JS 端使用
 `window.qtwebview.api.funcName()` 调用，完全支持 `Promise` / `async` / `await`。
@@ -144,7 +145,10 @@ win.show()
 sys.exit(app.exec())
 ```
 
-### WSGI — 运行 Flask / Bottle / Django
+</details>
+
+<details>
+<summary>### WSGI — 运行 Flask / Bottle / Django</summary>
 
 在 WebView 中运行 WSGI 应用，通过自定义协议（`qtwebview://` scheme）提供服务
 —— 无需 TCP 端口，零网络开销。也可以使用 `wsgi_scheme="localhost"` 切换到本地 HTTP 模式。
@@ -291,6 +295,8 @@ if __name__ == "__main__":
     win.show()
     sys.exit(app.exec())
 ```
+
+</details>
 
 ## ⚠️ 系统托盘 / 隐藏与恢复
 

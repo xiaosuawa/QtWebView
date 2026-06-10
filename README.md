@@ -63,7 +63,8 @@ win.show()
 sys.exit(app.exec())
 ```
 
-### JS Bridge — Python ↔ JavaScript
+<details>
+<summary>### JS Bridge — Python ↔ JavaScript</summary>
 
 Expose Python functions to JavaScript with `DictJsBridge`. JS calls Python via
 `window.qtwebview.api.funcName()` — with full `Promise` / `async` / `await` support.
@@ -71,75 +72,72 @@ Expose Python functions to JavaScript with `DictJsBridge`. JS calls Python via
 ```python
 import sys
 from qtpy.QtWidgets import QApplication, QVBoxLayout, QWidget
-from qtpy.QtCore import Slot
+from qtpy.QtCore import Slot, QCoreApplication
 from qtwebview2 import QtWebViewWidget, DictJsBridge
 
+# Set an application name so the user data folder path stays stable
+QCoreApplication.setApplicationName("QtWebView-Demo")
+
+# 1. Initialize app and window
 app = QApplication(sys.argv)
 win = QWidget()
 win.setWindowTitle("JS Bridge Demo")
 win.resize(800, 600)
 layout = QVBoxLayout(win)
 
-# 1. Create the JS bridge and register Python functions
+# 2. Create JS bridge instance
 js_bridge = DictJsBridge()
 
-@js_bridge.bind_js_api_func
-def get_system_info():
-    """Callable from JS: await window.qtwebview.api.get_system_info()"""
-    import platform
-    return {
-        "os": platform.system(),
-        "python": platform.python_version(),
-        "arch": platform.machine(),
-    }
-
-@js_bridge.bind_js_api_func
-def greet(name: str):
-    """Callable from JS: await window.qtwebview.api.greet('World')"""
-    return f"Hello, {name}! — from Python"
-
-# 2. Create the webview with the bridge
-webview = QtWebViewWidget(parent=win, js_apis=js_bridge)
+# 3. Create WebView widget with JS bridge injected
+webview = QtWebViewWidget(js_apis=js_bridge, debug=True)
 layout.addWidget(webview)
 
-# 3. Load HTML that uses the bridge
-webview.load_html("""
+
+# 4. (JS -> Python) Define a Python function and expose it to JavaScript
+@js_bridge.bind_js_api_func
+def get_user_os():
+    """This Python function will be callable from JavaScript."""
+    print(f"Python function 'get_user_os' was called from JavaScript!")
+    return sys.platform
+
+
+# 5. Define HTML content with JavaScript that calls Python
+html_content = """
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>JS Bridge</title></head>
-<body style="font-family: sans-serif; text-align: center; padding: 40px;">
-    <h1>🐍 Python ↔ JavaScript</h1>
-    <button onclick="callPython()" style="padding:12px 24px; font-size:16px;">
-        Call Python
-    </button>
-    <pre id="output" style="margin-top:20px; text-align:left; background:#1e1e1e;
-        color:#4ec9b0; padding:16px; border-radius:8px; min-height:80px;">
-// click the button...
-    </pre>
+<head><title>JS Bridge Test</title></head>
+<body style="font-family: sans-serif; text-align: center; background-color: #f0f0f0;">
+    <h1>QtWebView JS Bridge Demo</h1>
+    <button onclick="callPython()">Click to Call Python!</button>
+    <p>Result from Python: <b id="result">...</b></p>
     <script>
         async function callPython() {
-            const out = document.getElementById('output');
-            out.textContent = '// calling...';
             try {
-                const info = await window.qtwebview.api.get_system_info();
-                const msg  = await window.qtwebview.api.greet('Qt');
-                out.textContent = JSON.stringify(info, null, 2) + '\n\n' + msg;
+                // Call Python function with async/await and get the result
+                const os = await window.qtwebview.api.get_user_os();
+                document.getElementById('result').textContent = os;
             } catch (e) {
-                out.textContent = 'Error: ' + e;
+                document.getElementById('result').textContent = 'Error: ' + e;
             }
         }
     </script>
 </body>
 </html>
-""")
+"""
 
-# 4. Python → JS: execute JavaScript when the page loads
+webview.load_html(html_content)
+
+
+# 6. Python -> JS: Execute JavaScript after page loads
 @Slot(str, str)
 def on_page_loaded(evt, url):
     if evt == "Finished":
-        webview.eval_js(
-            'document.body.style.background = "linear-gradient(135deg, #667eea, #764ba2)"'
-        )
+        webview.evaluate_js("""(function() {
+            const new_element = document.createElement('h2');
+            new_element.textContent = 'Hello from Python!';
+            document.body.appendChild(new_element);
+        })()""")
+
 
 webview.signals.page_loaded.connect(on_page_loaded)
 
@@ -147,7 +145,10 @@ win.show()
 sys.exit(app.exec())
 ```
 
-### WSGI — Flask / Bottle / Django
+</details>
+
+<details>
+<summary>### WSGI — Flask / Bottle / Django</summary>
 
 Run your WSGI app inside the webview. Requests are served via custom protocol
 (`qtwebview://` scheme) — no TCP port, zero network overhead. Or switch to
@@ -296,6 +297,8 @@ if __name__ == "__main__":
     sys.exit(app.exec())
 ```
 
+</details>
+
 ## ⚠️ System Tray / Hide & Show
 
 By default, `QtWebViewWidget` uses an independent anchor window
@@ -322,7 +325,7 @@ def closeEvent(self, event):
 | **Package Size**   | ✅ Small (wryview .pyd)       | Small           | ❌ Large (~80MB) |
 | **WSGI**           | ✅ Custom protocol (portless) | Local HTTP      | QWebChannel     |
 | **JS Bridge**      | ✅ Promise/async              | ✅               | ⚠️ Complex      |
-| **Startup**        | ~1.5s                        | ~1~3s           | ~2-3s           |
+| **Startup**        | ~1.5s                        | ~1-3s           | ~2-3s           |
 
 ## 🔄 Migration from v0.5.x
 
