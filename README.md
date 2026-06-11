@@ -345,7 +345,7 @@ webview = QtWebView2Widget(url=...)        webview = QtWebViewWidget(url=...)
 # handle_new_window=True/False   → new_window_handler=lambda url: "allow"|"deny"
 # wsgi_host_name="myapp.local"   → wsgi_scheme="qtwebview"
 # browser_executable_folder=...  → (not supported by wry)
-# fullscreen_support=True        → (not yet implemented)
+# fullscreen_support=True        → fullscreen_handler=your_handler
 # no_local_storage=True          → (removed, use incognito=True)
 
 # Removed parameters (no equivalent):
@@ -353,7 +353,8 @@ webview = QtWebView2Widget(url=...)        webview = QtWebViewWidget(url=...)
 
 # New parameters in v0.6.0:
 # html, headers, navigation_handler, incognito, autoplay,
-# javascript_enabled, hotkeys_zoom, drag_drop_handler
+# javascript_enabled, hotkeys_zoom, drag_drop_handler,
+# js_apis, wsgi_executor, fullscreen_handler, parent, native_child
 ```
 
 ## 📦 API Overview
@@ -370,14 +371,19 @@ webview = QtWebViewWidget(
     navigation_handler=lambda url: True,   # return False to block
     new_window_handler=lambda url: "allow",
     lazyload=True,                         # defer to showEvent
+    js_apis=DictJsBridge(),               # JS API bridge
     incognito=False,
     user_data_folder="/path/to/cache",
     wsgi_app=flask_app,
     wsgi_scheme="qtwebview",
+    wsgi_executor=8,                       # WSGI thread pool size
     autoplay=False,
     javascript_enabled=True,
     hotkeys_zoom=True,
     drag_drop_handler=lambda evt, paths, pos: True,
+    fullscreen_handler=lambda enter: ...,  # custom fullscreen behavior
+    native_child=False,                    # anchor window mode
+    parent=self,                           # parent QWidget
 )
 
 webview.load_url(url)                     # Navigate

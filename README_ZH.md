@@ -341,7 +341,7 @@ webview = QtWebView2Widget(url=...)        webview = QtWebViewWidget(url=...)
 # handle_new_window=True/False   → new_window_handler=lambda url: "allow"|"deny"
 # wsgi_host_name="myapp.local"   → wsgi_scheme="qtwebview"
 # browser_executable_folder=...  → (wry 不支持)
-# fullscreen_support=True        → (尚未实现)
+# fullscreen_support=True        → fullscreen_handler=自定义处理函数
 # no_local_storage=True          → (已移除，使用 incognito=True)
 
 # 已移除的参数（无对等项）：
@@ -349,7 +349,8 @@ webview = QtWebView2Widget(url=...)        webview = QtWebViewWidget(url=...)
 
 # v0.6.0 新增参数：
 # html, headers, navigation_handler, incognito, autoplay,
-# javascript_enabled, hotkeys_zoom, drag_drop_handler
+# javascript_enabled, hotkeys_zoom, drag_drop_handler,
+# js_apis, wsgi_executor, fullscreen_handler, parent, native_child
 ```
 
 ## 📦 API 概览
@@ -366,14 +367,19 @@ webview = QtWebViewWidget(
     navigation_handler=lambda url: True,   # 返回 False 阻止导航
     new_window_handler=lambda url: "allow",
     lazyload=True,                         # 延迟到 showEvent 加载
+    js_apis=DictJsBridge(),               # JS API 桥接
     incognito=False,
     user_data_folder="/path/to/cache",
     wsgi_app=flask_app,
     wsgi_scheme="qtwebview",
+    wsgi_executor=8,                       # WSGI 线程池大小
     autoplay=False,
     javascript_enabled=True,
     hotkeys_zoom=True,
     drag_drop_handler=lambda evt, paths, pos: True,
+    fullscreen_handler=lambda enter: ...,  # 自定义全屏行为
+    native_child=False,                    # 锚点窗口模式
+    parent=self,                           # 父级 QWidget
 )
 
 webview.load_url(url)                     # 导航

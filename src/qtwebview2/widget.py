@@ -551,7 +551,7 @@ class QtWebViewWidget(QWidget):
 
         QTimer.singleShot(0, self._resize_webview)
 
-        return WebView(hwnd, as_child=self._native_child, **kwargs)
+        return WebView(hwnd, **kwargs)
 
     def _flush_pending(self):
         for name, args, kwargs in self._pending_calls:
