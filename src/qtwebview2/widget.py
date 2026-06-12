@@ -24,187 +24,22 @@ import functools
 import json
 import logging
 import sys
-import typing
 import webbrowser
 from io import BytesIO
 from typing import Callable, Any, Optional, Union
 from typing_extensions import deprecated
-from qtpy.QtCore import Qt, QObject, Signal, QTimer, QStandardPaths
+from qtpy.QtCore import Qt, QTimer, QStandardPaths
 from qtpy.QtWidgets import QWidget
 from qtpy.QtGui import QWindow
 from wryview import WebView
 
+from ._bridge import (
+    QtWebViewSignals, QtWebViewJsBridge, DictJsBridge,
+    _JS_BRIDGE, _FULLSCREEN_JS,
+)
+from ._anchor import _AnchorWindow
+
 logger = logging.getLogger(__name__)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# JS Bridge
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class QtWebViewSignals(QObject):
-    """Signals emitted by QtWebViewWidget."""
-    # WebView events
-    initialization_done = Signal()
-    page_loaded = Signal(str, str)  # (event: "Started"|"Finished", url)
-    title_changed = Signal(str)  # (title)
-    navigation_requested = Signal(str)  # (url)
-    new_window_requested = Signal(str)  # (url)
-    # JS IPC
-    web_message_received = Signal(str)  # (json_message)
-
-
-@deprecated("Use QtWebViewSignals instead")
-class QtWebView2ApiBridge(QtWebViewSignals):
-    ...
-
-
-JSONSerializable = Union[dict[str, "JSONSerializable"], list["JSONSerializable"], str, int, float, bool, None]
-
-
-@typing.runtime_checkable
-class QtWebViewJsBridge(typing.Protocol):
-    def __call__(self, name, *arg) -> Union[JSONSerializable, Callable[[Callable[[JSONSerializable], Any], Any], Any]]:
-        ...
-
-
-@deprecated("Use QtWebViewJsBridge instead")
-class QtWebView2JsBridge(QtWebViewJsBridge):
-    ...
-
-
-class DictJsBridge:
-    """Dictionary-based JS API bridge — Python functions callable from JS."""
-
-    def __init__(self, js_apis: Optional[dict[str, Callable[..., JSONSerializable]]] = None):
-        self.js_apis = js_apis or {}
-
-    def __call__(self, name, *arg) -> Union[JSONSerializable, Callable[[Callable[[JSONSerializable], Any], Any], Any]]:
-        if name in self.js_apis:
-            fn = self.js_apis[name]
-            if hasattr(fn, "async_func"):
-                return fn
-            return fn(*arg)
-        raise ValueError(f"Undefined JS API: {name}")
-
-    def bind_js_api_func(self, func: Callable, async_func: bool = False, name: Optional[str] = None):
-        """ Decorator to bind a Python function to the JS API. """
-        name = name or func.__name__
-        if async_func:
-            setattr(func, "async_func", True)
-        self.js_apis[name] = func
-        return func
-
-
-_JS_BRIDGE = """
-(function() {
-    if (window.qtwebview || window.qtwebview2) return;
-    var pending = {};
-
-    function genId() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-            var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-        });
-    }
-
-    window.qtwebview = window.qtwebview2 = {
-        api: new Proxy({}, {
-            get: function(target, prop) {
-                return function() {
-                    var callId = genId();
-                    var args = Array.prototype.slice.call(arguments);
-                    return new Promise(function(resolve, reject) {
-                        pending[callId] = {resolve: resolve, reject: reject};
-                        window.ipc.postMessage(JSON.stringify({
-                            type: "qtwebview", name: prop, params: args, id: callId
-                        }));
-                    });
-                };
-            }
-        })
-    };
-
-    // Listen for Python responses via CustomEvent
-    window.addEventListener('qtwebview-response', function(e) {
-        if (!e.detail) return;
-        var data = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail;
-        for (var id in pending) {
-            if (data.id === id || (data.result !== undefined && pending[id])) {
-                pending[id].resolve(data.result);
-                delete pending[id];
-                return;
-            }
-            if (data.error) {
-                pending[id].reject(new Error(data.error));
-                delete pending[id];
-                return;
-            }
-        }
-    });
-})();
-"""
-
-_FULLSCREEN_JS = """
-(function() {
-    if (Element.prototype.hasOwnProperty('_qtwebview_fs')) return;
-    Object.defineProperty(Element.prototype, '_qtwebview_fs', {value: true});
-
-    var _origReqFS = Element.prototype.requestFullscreen;
-    var _origExitFS = Document.prototype.exitFullscreen;
-
-    Element.prototype.requestFullscreen = function(opts) {
-        window.ipc.postMessage(JSON.stringify({
-            type: "qtwebview", name: "__fullscreen__", params: [true], id: "fs"
-        }));
-        return _origReqFS ? _origReqFS.call(this, opts) : Promise.resolve();
-    };
-
-    Document.prototype.exitFullscreen = function() {
-        window.ipc.postMessage(JSON.stringify({
-            type: "qtwebview", name: "__fullscreen__", params: [false], id: "fs"
-        }));
-        return _origExitFS ? _origExitFS.call(this) : Promise.resolve();
-    };
-})();
-"""
-
-
-class _AnchorWindow(QWidget):
-    """
-    Top-level transparent widget — the WebView's parent window.
-
-    No Qt parent → independent HWND that survives hide / show cycles.
-    macOS: ``WA_TranslucentBackground`` prevents the resize flash.
-    Windows: no ``WA_TranslucentBackground`` to avoid the layered-window hit-test bug with ``createWindowContainer``.
-    """
-
-    def __init__(self):
-        super().__init__(None)
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        if sys.platform != "win32":
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setWindowFlags(
-            Qt.WindowType.Tool
-            | Qt.WindowType.FramelessWindowHint
-        )
-
-    # ── Abandoned approach — kept for reference ────────────────────────
-    # We originally used ``WA_TranslucentBackground`` on all platforms with
-    # a nearly-transparent paintEvent (alpha=1) to eliminate the resize flash.
-    #
-    # On Windows, after the anchor is embedded via ``createWindowContainer``,
-    # paintEvent stops firing entirely — manual repaint also has no effect.
-    # Areas expanded beyond the initial size never receive the alpha=1 fill,
-    # so the DWM has nothing to hit-test against and clicks pass through to
-    # the desktop.  macOS does not have this problem (no per-pixel hit-test).
-    #
-    # The fix: drop ``WA_TranslucentBackground`` on Windows.
-    #
-    # def paintEvent(self, event):
-    #     p = QPainter(self)
-    #     p.fillRect(self.rect(), QColor(0, 0, 0, 1))
-    #     p.end()
-    # ────────────────────────────────────────────────────────────────────
 
 
 def _require_webview(error_if_not_ready: bool = False):
